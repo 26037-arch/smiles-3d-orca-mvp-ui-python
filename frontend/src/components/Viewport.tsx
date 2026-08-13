@@ -7,6 +7,8 @@ import { angleDegrees, distance, normalize, stableAngleAxis, sub } from '../chem
 import { ELEMENTS } from '../chem/elements'
 import { useProjectStore, visibleProject } from '../store/projectStore'
 import type { Atom, Bond, SketchPlane, SurfaceLayer, Vec3 } from '../types'
+import { WeightedBlendedOIT } from './WeightedBlendedOIT'
+import { createOitSurfaceMaterial, OIT_LAYER, OIT_SURFACE_FLAG } from './weightedBlendedOitMaterial'
 
 function BondMesh({ bond, atoms }: { bond: Bond; atoms: Atom[] }) {
   const a = atoms.find(x => x.id === bond.atomId1); const b = atoms.find(x => x.id === bond.atomId2)
@@ -65,9 +67,19 @@ function AngleMeasure({ atoms, ids }: { atoms: Atom[]; ids: string[] }) {
 
 function SurfaceMesh({ layer, phase, url }: { layer: SurfaceLayer; phase: string; url: string }) {
   const geometry = useLoader(PLYLoader, url); useMemo(() => geometry.computeVertexNormals(), [geometry])
-  return <mesh geometry={geometry}>
-    <meshPhongMaterial color={phase === 'positive' ? layer.positiveColor : layer.negativeColor} transparent opacity={layer.opacity} side={THREE.DoubleSide} depthTest depthWrite shininess={50} />
-  </mesh>
+  const color = phase === 'positive' ? layer.positiveColor : layer.negativeColor
+  const [material] = useState(() => createOitSurfaceMaterial(color, layer.opacity))
+  useEffect(() => {
+    material.uniforms.uColor.value.set(color)
+    material.uniforms.uOpacity.value = layer.opacity
+  }, [color, layer.opacity, material])
+  useEffect(() => () => material.dispose(), [material])
+  return <mesh
+    geometry={geometry}
+    material={material}
+    ref={mesh => mesh?.layers.set(OIT_LAYER)}
+    userData={{ [OIT_SURFACE_FLAG]: true }}
+  />
 }
 
 function FitController({ atoms }: { atoms: Atom[] }) {
@@ -101,7 +113,7 @@ function Scene() {
     {tool === 'move' && <TransformGizmo atoms={project.atoms} />}
     {tool === 'distance' && <DistanceMeasure atoms={project.atoms} ids={toolAtoms} />}{tool === 'angle' && <AngleMeasure atoms={project.atoms} ids={toolAtoms} />}
     {surfaces.filter(s => s.visible && !s.loading).flatMap(layer => Object.entries(layer.meshUrls).map(([phase, url]) => <SurfaceMesh key={`${layer.key}-${phase}-${url}`} layer={layer} phase={phase} url={url} />))}
-    <axesHelper args={[2]} visible={project.displaySettings.showAxes} /><FitController atoms={project.atoms} />
+    <axesHelper args={[2]} visible={project.displaySettings.showAxes} /><FitController atoms={project.atoms} /><WeightedBlendedOIT />
   </>
 }
 
