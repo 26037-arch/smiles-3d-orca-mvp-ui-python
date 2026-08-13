@@ -1,14 +1,20 @@
 import type { CalculationResult, Capabilities, MoleculeProject, OrbitalComposition, OrbitalSpin, PlotSample, PlotSampleRequest } from '../types'
 
+export function apiErrorMessage(body: any, status: number, statusText: string): string {
+  const detail = body?.detail?.message ?? body?.detail
+  const code = body?.detail?.code
+  const message = Array.isArray(detail)
+    ? detail.map(item => `${item.loc?.slice(-1)?.[0] ?? '입력'}: ${item.msg}`).join(' · ')
+    : detail
+  if (code && message) return `${code}: ${message}`
+  return message ?? `${status} ${statusText}`
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, { ...init, cache: 'no-store', headers: { 'Content-Type': 'application/json', ...init?.headers } })
   if (!response.ok) {
     const body = await response.json().catch(() => null)
-    const detail = body?.detail?.message ?? body?.detail
-    const message = Array.isArray(detail)
-      ? detail.map(item => `${item.loc?.slice(-1)?.[0] ?? '입력'}: ${item.msg}`).join(' · ')
-      : detail
-    throw new Error(message ?? `${response.status} ${response.statusText}`)
+    throw new Error(apiErrorMessage(body, response.status, response.statusText))
   }
   return response.json()
 }

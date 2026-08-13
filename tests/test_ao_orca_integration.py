@@ -67,6 +67,7 @@ def test_real_orca61_json_loewdin_and_atomic_orbital_cube(tmp_path):
 
     cube_path = tmp_path / "basis-0.cube"
     service._generate_ao_cube(tmp_path, gbw, 0, cube_path)
+    assert (tmp_path / "h2.ao0.cube").is_file()
     cube = read_cube(cube_path)
     assert cube.values.size > 0
     assert float(abs(cube.values).max()) > 0.0

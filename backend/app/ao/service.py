@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import threading
@@ -141,11 +142,16 @@ class AOAnalysisService:
         cube_dir.mkdir(exist_ok=True)
         raw_cube = cube_dir / f"{gbw_hash[:16]}.basis-{basis_index}.res40.cube"
         lock = self._lock(str(raw_cube.resolve()))
+        plot_lock = self._lock(f"orca-plot:{gbw.resolve()}")
         with lock:
             if not raw_cube.is_file():
                 temporary = raw_cube.with_suffix(f".{threading.get_ident()}.tmp")
                 try:
-                    self.cube_generator(job_dir, gbw, basis_index, temporary)
+                    # orca_plot writes into the GBW directory using process-global
+                    # filenames. Different AO indices must share one critical
+                    # section through output identification and copying.
+                    with plot_lock:
+                        self.cube_generator(job_dir, gbw, basis_index, temporary)
                     read_cube(temporary)
                     temporary.replace(raw_cube)
                 finally:
@@ -193,7 +199,9 @@ class AOAnalysisService:
             with mesh_lock:
                 if not output.is_file():
                     cache_hit = False
-                    temporary = output.with_suffix(f".{threading.get_ident()}.tmp")
+                    temporary = output.with_name(
+                        f"{output.stem}.{threading.get_ident()}.tmp{output.suffix}"
+                    )
                     try:
                         level = request.isovalue if phase == "positive" else -request.isovalue
                         contour_to_ply(scaled, level, temporary)
@@ -282,12 +290,21 @@ class AOAnalysisService:
             for path in job_dir.glob("*.cube")
             if path.resolve() not in before or path.stat().st_mtime_ns > before[path.resolve()]
         ]
-        if len(candidates) != 1:
+        generated = _identify_ao_cube(
+            job_dir,
+            gbw,
+            basis_index,
+            candidates,
+            f"{completed.stdout}\n{completed.stderr}",
+        )
+        if generated is None:
             raise ChemistryError(
                 "AO_BASIS_MAPPING_FAILED",
-                f"Expected one AO Cube for basis index {basis_index}; found {len(candidates)}.",
+                f"Expected one AO Cube for basis index {basis_index}; "
+                f"found {len(candidates)} changed files: "
+                f"{', '.join(path.name for path in candidates) or '(none)' }.",
             )
-        shutil.copyfile(candidates[0], output)
+        shutil.copyfile(generated, output)
 
     @staticmethod
     def _final_gbw(job_dir: Path) -> Path:
@@ -319,6 +336,38 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _identify_ao_cube(
+    job_dir: Path,
+    gbw: Path,
+    basis_index: int,
+    changed: list[Path],
+    process_output: str,
+) -> Path | None:
+    """Prefer ORCA's deterministic/reported name before a one-file fallback."""
+    changed_by_path = {path.resolve(): path for path in changed}
+    expected = (job_dir / f"{gbw.stem}.ao{basis_index}.cube").resolve()
+    if expected in changed_by_path:
+        return changed_by_path[expected]
+
+    reported: list[Path] = []
+    for match in re.finditer(
+        r'''(?i)(?:"([^"\r\n]+\.cube)"|'([^'\r\n]+\.cube)'|([^\s"']+\.cube))''',
+        process_output,
+    ):
+        token = next(group for group in match.groups() if group).rstrip(".,;:)")
+        candidate = Path(token)
+        if not candidate.is_absolute():
+            candidate = job_dir / candidate
+        resolved = candidate.resolve()
+        if resolved in changed_by_path and changed_by_path[resolved] not in reported:
+            reported.append(changed_by_path[resolved])
+    if len(reported) == 1:
+        return reported[0]
+    if len(changed) == 1:
+        return changed[0]
+    return None
 
 
 def _atomic_json(path: Path, payload: object) -> None:

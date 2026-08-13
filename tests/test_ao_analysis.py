@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +16,7 @@ from backend.app.ao.analysis import (
     loewdin_contributions,
     parse_orca_gbw_json,
 )
-from backend.app.ao.service import AOAnalysisService
+from backend.app.ao.service import AOAnalysisService, _identify_ao_cube
 from backend.app.chemistry.opi_adapter import ChemistryError
 from backend.app.config import LocalSettings
 from backend.app.models import (
@@ -227,9 +229,11 @@ def test_ao_surface_scales_cube_by_phase_normalized_mo_coefficient(
         )
 
     generated = []
+    mesh_outputs = []
 
     def contour(cube, level, output):
         generated.append((cube.values.copy(), level))
+        mesh_outputs.append(output)
         output.write_bytes(b"ply")
 
     monkeypatch.setattr("backend.app.ao.service.contour_to_ply", contour)
@@ -248,6 +252,72 @@ def test_ao_surface_scales_cube_by_phase_normalized_mo_coefficient(
     assert [level for _, level in generated] == [0.03, -0.03]
     assert generated[0][0].min() == pytest.approx(-0.08)
     assert generated[0][0].max() == pytest.approx(0.08)
+    assert all(path.suffix == ".ply" for path in mesh_outputs)
+    assert all(path.name.endswith(".tmp.ply") for path in mesh_outputs)
+
+
+def test_different_basis_surfaces_serialize_orca_plot_per_gbw(monkeypatch, tmp_path):
+    state_lock = threading.Lock()
+    active = 0
+    maximum_active = 0
+    generated_basis = []
+
+    def cube_generator(_job_dir, _gbw, basis_index, output):
+        nonlocal active, maximum_active
+        with state_lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+            generated_basis.append(basis_index)
+        try:
+            time.sleep(0.05)
+            output.write_text(
+                "component\ncube\n1 0 0 0\n2 1 0 0\n2 0 1 0\n2 0 0 1\n"
+                "1 0 0 0 0\n-0.10 0.10 -0.10 0.10 -0.10 0.10 -0.10 0.10\n",
+                encoding="ascii",
+            )
+        finally:
+            with state_lock:
+                active -= 1
+
+    def contour(_cube, _level, output):
+        output.write_bytes(b"ply")
+
+    monkeypatch.setattr("backend.app.ao.service.contour_to_ply", contour)
+    service, jobs = make_service(
+        tmp_path, lambda *_: fixture_document(), cube_generator=cube_generator
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        records = list(
+            pool.map(
+                lambda basis_index: service.create_surface(
+                    jobs.job_id,
+                    "restricted",
+                    0,
+                    basis_index,
+                    BasisSurfaceRequest(isovalue=0.03),
+                ),
+                [0, 1],
+            )
+        )
+
+    assert len(records) == 2
+    assert sorted(generated_basis) == [0, 1]
+    assert maximum_active == 1
+
+
+def test_ao_cube_identification_prefers_exact_then_reported_filename(tmp_path):
+    gbw = tmp_path / "electronic.gbw"
+    exact = tmp_path / "electronic.ao7.cube"
+    unrelated = tmp_path / "other.cube"
+
+    assert _identify_ao_cube(tmp_path, gbw, 7, [unrelated, exact], "") == exact
+    assert _identify_ao_cube(
+        tmp_path,
+        gbw,
+        8,
+        [unrelated, exact],
+        "Output file ... other.cube",
+    ) == unrelated
 
 
 def test_empty_ao_isosurface_and_cube_tool_failures_are_structured(tmp_path):

@@ -163,9 +163,11 @@ function AOCompositionPanel({ capabilities }: { capabilities?: Capabilities }) {
       setComposition(page)
       setItems(page.items)
       setChecked(initialBasisSelection(page.items))
-      await Promise.all(page.items.map(item => (
-        loadSurface(orbital, item, requestGeneration, nextController.signal)
-      )))
+      // orca_plot writes into the shared job directory, so initial AO generation
+      // remains sequential even though the backend also serializes it per GBW.
+      for (const item of page.items) {
+        await loadSurface(orbital, item, requestGeneration, nextController.signal)
+      }
     } catch (error) {
       if (!nextController.signal.aborted && generation.current === requestGeneration) {
         setLocalError((error as Error).message)
@@ -277,7 +279,7 @@ function AOCompositionPanel({ capabilities }: { capabilities?: Capabilities }) {
             <span><b>{item.atom_label} · {item.shell_label}</b><small>Cμ {item.coefficient >= 0 ? '+' : ''}{item.coefficient.toFixed(3)} · Löwdin {item.percentage.toFixed(1)}%</small></span>
             <i>{item.phase}</i>
             {layer?.loading && <em>생성 중</em>}
-            {layer?.error && <em className="bad">오류</em>}
+            {layer?.error && <em className="bad" title={layer.error}>{layer.error}</em>}
           </label>
         })}
       </div>
