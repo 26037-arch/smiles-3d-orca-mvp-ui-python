@@ -13,6 +13,7 @@ from .fields import CubeFieldService
 from .plots import PlotSamplingService
 from .surfaces.service import SurfaceService
 from .ao import AOAnalysisService
+from .reaction_path import ReactionPathService
 
 
 @asynccontextmanager
@@ -26,6 +27,7 @@ async def lifespan(app: FastAPI):
     app.state.surfaces = SurfaceService(app.state.jobs, app.state.fields)
     app.state.plots = PlotSamplingService(app.state.jobs, app.state.fields)
     app.state.ao = AOAnalysisService(app.state.jobs, settings)
+    app.state.reaction_paths = ReactionPathService(app.state.jobs)
     yield
     app.state.jobs.executor.shutdown(wait=False, cancel_futures=True)
 

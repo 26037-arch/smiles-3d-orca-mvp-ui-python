@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "sourceType": "imported",
+  "atomCount": 3,
+  "elements": ["O", "H", "H"],
+  "charge": 0,
+  "multiplicity": 1,
+  "hasPhysicalTime": false,
+  "energyUnit": "eV",
+  "images": [
+    {"id": "p0", "index": 0, "atoms": [{"element": "O", "atomIndex": 0, "x": 0, "y": 0, "z": 0}, {"element": "H", "atomIndex": 1, "x": 0.96, "y": 0, "z": 0}, {"element": "H", "atomIndex": 2, "x": -0.24, "y": 0.93, "z": 0}], "energy": -2067.0, "reactionCoordinate": 0, "orbitalRefs": {}, "convergence": "converged"},
+    {"id": "p1", "index": 1, "atoms": [{"element": "O", "atomIndex": 0, "x": 2, "y": 1, "z": 0}, {"element": "H", "atomIndex": 1, "x": 2, "y": 1.96, "z": 0}, {"element": "H", "atomIndex": 2, "x": 1.07, "y": 0.76, "z": 0}], "energy": -2066.5, "reactionCoordinate": 0.45, "orbitalRefs": {}, "convergence": "converged"},
+    {"id": "p2", "index": 2, "atoms": [{"element": "O", "atomIndex": 0, "x": 0, "y": 0, "z": 0}, {"element": "H", "atomIndex": 1, "x": 1.05, "y": 0, "z": 0}, {"element": "H", "atomIndex": 2, "x": -0.35, "y": 0.82, "z": 0}], "energy": -2066.8, "reactionCoordinate": 1, "orbitalRefs": {}, "convergence": "unknown"}
+  ]
+}

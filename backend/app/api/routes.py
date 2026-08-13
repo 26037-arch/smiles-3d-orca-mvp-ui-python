@@ -47,6 +47,10 @@ def ao(request: Request):
     return request.app.state.ao
 
 
+def reaction_paths(request: Request):
+    return request.app.state.reaction_paths
+
+
 def error(status: int, code: str, detail: str) -> HTTPException:
     return HTTPException(status_code=status, detail={"code": code, "message": detail})
 
@@ -69,6 +73,12 @@ def get_capabilities() -> dict[str, object]:
 class OrcaPathUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     path: str | None
+
+
+class ReactionOrbitalTrackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    orbital_id: str
+    isovalue: float = 0.03
 
 
 @router.put("/settings/orca-path")
@@ -125,6 +135,40 @@ def get_result(job_id: UUID, request: Request):
         raise error(404, "JOB_NOT_FOUND", "작업을 찾을 수 없습니다") from exc
     except ChemistryError as exc:
         raise error(409, exc.code, exc.detail) from exc
+
+
+@router.get("/jobs/{job_id}/reaction-path")
+def get_reaction_path(job_id: UUID, request: Request):
+    from ..reaction_path import ReactionPathError
+
+    try:
+        return reaction_paths(request).load(job_id)
+    except ReactionPathError as exc:
+        status = 404 if exc.code == "REACTION_PATH_NOT_FOUND" else 422
+        raise error(status, exc.code, exc.detail) from exc
+
+
+@router.post("/jobs/{job_id}/reaction-path/orbitals/track")
+def track_reaction_path_orbital(job_id: UUID, body: ReactionOrbitalTrackRequest, request: Request):
+    from ..reaction_path import ReactionPathError
+
+    try:
+        if not 0 < body.isovalue < 100:
+            raise ReactionPathError("INVALID_ISOVALUE", "등밀도값은 0보다 커야 합니다")
+        return reaction_paths(request).track_orbital(job_id, body.orbital_id, body.isovalue)
+    except ReactionPathError as exc:
+        raise error(422, exc.code, exc.detail) from exc
+    except (OSError, ValueError) as exc:
+        raise error(422, "ORBITAL_TRACKING_FAILED", str(exc)) from exc
+
+
+@router.get("/jobs/{job_id}/reaction-path/surfaces/{surface_id}/mesh")
+def reaction_path_surface_mesh(job_id: UUID, surface_id: str, request: Request) -> FileResponse:
+    try:
+        path = reaction_paths(request).mesh_path(job_id, surface_id)
+        return FileResponse(path, media_type="application/octet-stream", filename=path.name, headers={"Cache-Control": "no-store"})
+    except FileNotFoundError as exc:
+        raise error(404, "REACTION_SURFACE_NOT_FOUND", "반응 경로 MO mesh를 찾을 수 없습니다") from exc
 
 
 @router.get("/jobs/{job_id}/orbitals")

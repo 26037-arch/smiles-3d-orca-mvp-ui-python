@@ -2,7 +2,8 @@ import { create } from 'zustand'
 import { inferBonds } from '../chem/bonds'
 import { changeAngle, changeDistance, threeAtomPlane } from '../chem/geometry'
 import { AO_REFERENCE_OPACITY } from '../chem/aoComposition'
-import type { Atom, Bond, CalculationResult, MoleculeProject, SketchPlane, SurfaceLayer, Tool, Vec3 } from '../types'
+import { projectForReactionFrame } from '../chem/reactionPath'
+import type { Atom, Bond, CalculationKind, CalculationResult, MoleculeProject, ReactionPathPlayback, ReactionPathStatus, SketchPlane, SurfaceLayer, Tool, Vec3 } from '../types'
 
 const plane = (kind: 'XY' | 'YZ' | 'ZX', origin: Vec3, normal: Vec3, basisU: Vec3, basisV: Vec3): SketchPlane => ({
   id: crypto.randomUUID(), kind, atomIds: [], origin, normal, basisU, basisV, visible: kind === 'XY', active: kind === 'XY', valid: true,
@@ -40,6 +41,13 @@ export interface ProjectStore {
   aoMode: boolean
   aoOrbitalId?: string
   aoSurfaceSnapshot?: SurfaceLayer[]
+  calculationKind: CalculationKind
+  reactionStatus: ReactionPathStatus
+  reactionPath?: ReactionPathPlayback
+  reactionProject?: MoleculeProject
+  reactionFrameIndex: number
+  reactionError?: string
+  reactionCopyPrompt: boolean
   setTool(tool: Tool): void
   setAddElement(element: string): void
   selectAtom(id: string, additive?: boolean): void
@@ -73,6 +81,14 @@ export interface ProjectStore {
   setOrbitEnabled(value: boolean): void
   enterAOMode(reference: SurfaceLayer): void
   exitAOMode(): void
+  setCalculationKind(kind: CalculationKind): void
+  beginReactionPathLoad(): void
+  applyReactionPath(playback: ReactionPathPlayback): void
+  failReactionPath(message: string): void
+  setReactionFrame(index: number): void
+  setReactionPlaying(playing: boolean): void
+  copyReactionFrameToSingle(): void
+  dismissReactionCopyPrompt(): void
 }
 
 function refreshPlanes(project: MoleculeProject): MoleculeProject {
@@ -92,10 +108,26 @@ const withCommand = (state: ProjectStore, project: MoleculeProject) => ({
   project: refreshPlanes(project), history: { past: [...state.history.past, state.project].slice(-100), future: [] }, error: undefined,
 })
 
+const structureTools = new Set<Tool>(['add', 'move', 'plane', 'bond-add', 'bond-delete'])
+
+function blockReactionEdit(state: ProjectStore, set: (patch: Partial<ProjectStore>) => void): boolean {
+  if (state.calculationKind !== 'reaction-path' || !state.reactionPath) return false
+  set({ reactionStatus: 'paused', reactionCopyPrompt: true })
+  return true
+}
+
 export const useProjectStore = create<ProjectStore>((set, get) => ({
   project: newProject(), viewStructure: 'initial', selection: [], tool: 'select', addElement: 'C', toolAtoms: [],
   history: { past: [], future: [] }, surfaces: [], orbitEnabled: true, aoMode: false,
-  setTool: tool => set({ tool, toolAtoms: [], error: undefined }),
+  calculationKind: 'single', reactionStatus: 'idle', reactionFrameIndex: 0, reactionCopyPrompt: false,
+  setTool: tool => {
+    const state = get()
+    if (state.reactionStatus === 'playing' && structureTools.has(tool)) {
+      set({ notice: '재생 중에는 구조 편집이 잠깁니다. 일시정지한 뒤 편집하세요.' })
+      return
+    }
+    set({ tool, toolAtoms: [], error: undefined })
+  },
   setAddElement: addElement => set({ addElement }),
   selectAtom: (id, additive = false) => {
     const state = get(); const selected = additive ? (state.selection.includes(id) ? state.selection.filter(x => x !== id) : [...state.selection, id]) : [id]
@@ -110,6 +142,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
   clearSelection: () => set({ selection: [], toolAtoms: [] }),
   addAtom: (element, position) => {
+    if (blockReactionEdit(get(), set)) return
     if (position.some(x => !Number.isFinite(x))) return set({ error: '좌표는 유한한 숫자여야 합니다' })
     if (get().project.atoms.some(a => Math.hypot(...a.position.map((x, i) => x - position[i])) < .1)) return set({ error: '기존 원자와 0.1 Å 미만으로 겹칩니다' })
     const atom: Atom = { id: crypto.randomUUID(), element, position }
@@ -118,18 +151,22 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
   deleteSelected: () => {
     const state = get(); const deleting = new Set(state.selection)
+    if (blockReactionEdit(state, set)) return
     const project = { ...state.project, atoms: state.project.atoms.filter(a => !deleting.has(a.id)), bonds: state.project.bonds.filter(b => !deleting.has(b.atomId1) && !deleting.has(b.atomId2)), sketchPlanes: state.project.sketchPlanes.filter(p => !p.atomIds.some(id => deleting.has(id))) }
     set({ ...withCommand(state, project), selection: [] })
   },
   moveAtoms: (ids, delta) => {
     const state = get(); const moving = new Set(ids)
+    if (blockReactionEdit(state, set)) return
     set(withCommand(state, { ...state.project, atoms: state.project.atoms.map(a => moving.has(a.id) ? { ...a, position: a.position.map((x, i) => x + delta[i]) as Vec3 } : a) }))
   },
   updateAtom: (id, patch) => {
-    const state = get(); set(withCommand(state, { ...state.project, atoms: state.project.atoms.map(a => a.id === id ? { ...a, ...patch } : a) }))
+    const state = get(); if (blockReactionEdit(state, set)) return
+    set(withCommand(state, { ...state.project, atoms: state.project.atoms.map(a => a.id === id ? { ...a, ...patch } : a) }))
   },
   updateVisibleAtom: (id, patch) => {
     const state = get()
+    if (blockReactionEdit(state, set)) return
     if (state.viewStructure === 'optimized' && state.optimizedProject) {
       set({ optimizedProject: refreshPlanes({
         ...state.optimizedProject,
@@ -145,7 +182,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     }))
   },
   addBond: (a, b, order = 1) => {
-    const state = get(); if (a === b) return set({ error: '서로 다른 두 원자가 필요합니다' })
+    const state = get(); if (blockReactionEdit(state, set)) return; if (a === b) return set({ error: '서로 다른 두 원자가 필요합니다' })
     if (state.project.bonds.some(x => new Set([x.atomId1, x.atomId2]).has(a) && new Set([x.atomId1, x.atomId2]).has(b))) return set({ error: '이미 결합이 있습니다' })
     const bond: Bond = { id: crypto.randomUUID(), atomId1: a, atomId2: b, order, source: 'manual' }
     const exclusions = state.project.manualBondExclusions.filter(([x, y]) => !(new Set([x, y]).has(a) && new Set([x, y]).has(b)))
@@ -153,12 +190,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
   deleteBond: id => {
     const state = get(); const removed = state.project.bonds.find(b => b.id === id); if (!removed) return
+    if (blockReactionEdit(state, set)) return
     set(withCommand(state, { ...state.project, bonds: state.project.bonds.filter(b => b.id !== id), manualBondExclusions: [...state.project.manualBondExclusions, [removed.atomId1, removed.atomId2]] }))
   },
-  updateBondOrder: (id, order) => { const state = get(); set(withCommand(state, { ...state.project, bonds: state.project.bonds.map(b => b.id === id ? { ...b, order, source: 'manual' } : b) })) },
-  reinferBonds: () => { const state = get(); set(withCommand(state, { ...state.project, bonds: inferBonds(state.project.atoms, state.project.bonds, state.project.manualBondExclusions) })) },
+  updateBondOrder: (id, order) => { const state = get(); if (blockReactionEdit(state, set)) return; set(withCommand(state, { ...state.project, bonds: state.project.bonds.map(b => b.id === id ? { ...b, order, source: 'manual' } : b) })) },
+  reinferBonds: () => { const state = get(); if (blockReactionEdit(state, set)) return; set(withCommand(state, { ...state.project, bonds: inferBonds(state.project.atoms, state.project.bonds, state.project.manualBondExclusions) })) },
   createThreeAtomPlane: atomIds => {
     const state = get(); if (new Set(atomIds).size !== 3) return set({ error: '서로 다른 원자 세 개를 순서대로 선택하세요' })
+    if (blockReactionEdit(state, set)) return
     const atoms = atomIds.map(id => state.project.atoms.find(a => a.id === id)); if (atoms.some(a => !a)) return set({ error: '원자를 찾을 수 없습니다' })
     try {
       const geometry = threeAtomPlane(atoms[0]!.position, atoms[1]!.position, atoms[2]!.position)
@@ -166,11 +205,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       set(withCommand(state, { ...state.project, sketchPlanes: [...state.project.sketchPlanes.map(x => ({ ...x, active: false })), p] }))
     } catch (error) { set({ error: (error as Error).message }) }
   },
-  setActivePlane: id => { const state = get(); set(withCommand(state, { ...state.project, sketchPlanes: state.project.sketchPlanes.map(p => ({ ...p, active: p.id === id && p.valid })) })) },
-  togglePlane: id => { const state = get(); set(withCommand(state, { ...state.project, sketchPlanes: state.project.sketchPlanes.map(p => p.id === id ? { ...p, visible: !p.visible } : p) })) },
-  applyDistance: (ids, target) => { const state = get(); try { set(withCommand(state, { ...state.project, atoms: changeDistance(state.project.atoms, state.project.bonds, ...ids, target) })) } catch (e) { set({ error: (e as Error).message }) } },
-  applyAngle: (ids, target, camera) => { const state = get(); try { set(withCommand(state, { ...state.project, atoms: changeAngle(state.project.atoms, state.project.bonds, ...ids, target, camera) })) } catch (e) { set({ error: (e as Error).message }) } },
-  setProject: project => set({ project: refreshPlanes(project), optimizedProject: undefined, viewStructure: 'initial', selection: [], history: { past: [], future: [] }, result: undefined, surfaces: [], aoMode: false, aoOrbitalId: undefined, aoSurfaceSnapshot: undefined, error: undefined }),
+  setActivePlane: id => { const state = get(); if (blockReactionEdit(state, set)) return; set(withCommand(state, { ...state.project, sketchPlanes: state.project.sketchPlanes.map(p => ({ ...p, active: p.id === id && p.valid })) })) },
+  togglePlane: id => { const state = get(); if (blockReactionEdit(state, set)) return; set(withCommand(state, { ...state.project, sketchPlanes: state.project.sketchPlanes.map(p => p.id === id ? { ...p, visible: !p.visible } : p) })) },
+  applyDistance: (ids, target) => { const state = get(); if (blockReactionEdit(state, set)) return; try { set(withCommand(state, { ...state.project, atoms: changeDistance(state.project.atoms, state.project.bonds, ...ids, target) })) } catch (e) { set({ error: (e as Error).message }) } },
+  applyAngle: (ids, target, camera) => { const state = get(); if (blockReactionEdit(state, set)) return; try { set(withCommand(state, { ...state.project, atoms: changeAngle(state.project.atoms, state.project.bonds, ...ids, target, camera) })) } catch (e) { set({ error: (e as Error).message }) } },
+  setProject: project => set({ project: refreshPlanes(project), optimizedProject: undefined, viewStructure: 'initial', selection: [], history: { past: [], future: [] }, result: undefined, surfaces: [], aoMode: false, aoOrbitalId: undefined, aoSurfaceSnapshot: undefined, error: undefined, calculationKind: 'single', reactionStatus: 'idle', reactionPath: undefined, reactionProject: undefined, reactionFrameIndex: 0, reactionError: undefined, reactionCopyPrompt: false }),
   updateProject: patch => { const state = get(); set(withCommand(state, { ...state.project, ...patch })) },
   undo: () => { const state = get(); const previous = state.history.past.at(-1); if (previous) set({ project: previous, history: { past: state.history.past.slice(0, -1), future: [state.project, ...state.history.future] }, selection: [] }) },
   redo: () => { const state = get(); const next = state.history.future[0]; if (next) set({ project: next, history: { past: [...state.history.past, state.project], future: state.history.future.slice(1) }, selection: [] }) },
@@ -198,6 +237,53 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     aoOrbitalId: undefined,
     aoSurfaceSnapshot: undefined,
   })),
+  setCalculationKind: calculationKind => set(state => ({
+    calculationKind,
+    reactionStatus: calculationKind === 'reaction-path'
+      ? (state.reactionPath ? 'paused' : 'idle')
+      : 'idle',
+    tool: calculationKind === 'single' ? state.tool : 'select',
+    toolAtoms: [],
+    selection: [],
+  })),
+  beginReactionPathLoad: () => set({ reactionStatus: 'loading-path', reactionError: undefined }),
+  applyReactionPath: reactionPath => set(state => {
+    const frame = reactionPath.displayFrames[0]
+    return {
+      calculationKind: 'reaction-path', reactionPath, reactionFrameIndex: 0,
+      reactionProject: projectForReactionFrame(state.project, reactionPath.path, frame),
+      reactionStatus: 'paused', reactionError: undefined, surfaces: [], selection: [], toolAtoms: [],
+    }
+  }),
+  failReactionPath: reactionError => set({ reactionStatus: 'error', reactionError }),
+  setReactionFrame: reactionFrameIndex => set(state => {
+    if (!state.reactionPath) return {}
+    const bounded = Math.max(0, Math.min(reactionFrameIndex, state.reactionPath.displayFrames.length - 1))
+    const frame = state.reactionPath.displayFrames[bounded]
+    return {
+      reactionFrameIndex: bounded,
+      reactionProject: projectForReactionFrame(state.project, state.reactionPath.path, frame, state.reactionProject?.bonds),
+    }
+  }),
+  setReactionPlaying: playing => set(state => ({
+    reactionStatus: playing ? 'playing' : state.reactionPath ? 'paused' : 'idle',
+    tool: playing && structureTools.has(state.tool) ? 'select' : state.tool,
+    toolAtoms: playing ? [] : state.toolAtoms,
+  })),
+  copyReactionFrameToSingle: () => set(state => {
+    if (!state.reactionProject) return { reactionCopyPrompt: false }
+    const project = refreshPlanes({ ...state.reactionProject, name: `${state.project.name} · 경로 프레임 복사` })
+    return {
+      project, optimizedProject: undefined, viewStructure: 'initial', calculationKind: 'single',
+      reactionStatus: 'idle', reactionPath: undefined, reactionProject: undefined,
+      reactionFrameIndex: 0, reactionCopyPrompt: false, reactionError: undefined,
+      selection: [], toolAtoms: [], history: { past: [], future: [] }, surfaces: [], result: undefined,
+      notice: '현재 경로 프레임을 새 단일 구조로 복사했습니다.',
+    }
+  }),
+  dismissReactionCopyPrompt: () => set({ reactionCopyPrompt: false }),
 }))
 
-export const visibleProject = (state: ProjectStore) => state.viewStructure === 'optimized' && state.optimizedProject ? state.optimizedProject : state.project
+export const visibleProject = (state: ProjectStore) => state.calculationKind === 'reaction-path' && state.reactionProject
+  ? state.reactionProject
+  : state.viewStructure === 'optimized' && state.optimizedProject ? state.optimizedProject : state.project

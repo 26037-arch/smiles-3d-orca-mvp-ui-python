@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from backend.app.main import app
@@ -55,3 +58,19 @@ def test_orbital_composition_route_preserves_five_item_paging(monkeypatch, tmp_p
     assert response.json()["offset"] == 5
     assert response.json()["limit"] == 5
     assert captured == [(job_id, "alpha", 4, 5, 5)]
+
+
+def test_reaction_path_route_loads_versioned_manifest(monkeypatch, tmp_path):
+    monkeypatch.setenv("GEOORCA_JOBS_DIR", str(tmp_path))
+    job_id = "00000000-0000-0000-0000-000000000002"
+    job_dir = tmp_path / job_id
+    job_dir.mkdir()
+    shutil.copy(Path(__file__).parent / "fixtures" / "reaction-path.json", job_dir)
+    with TestClient(app) as client:
+        response = client.get(f"/api/jobs/{job_id}/reaction-path")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["path"]["schemaVersion"] == 1
+    assert len(payload["displayFrames"]) == 17
+    assert payload["displayFrames"][0]["isCalculated"] is True
+    assert payload["displayFrames"][1]["isCalculated"] is False

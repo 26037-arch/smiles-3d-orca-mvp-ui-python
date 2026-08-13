@@ -191,6 +191,82 @@ class CalculationResult(StrictModel):
     demo: bool = False
 
 
+class CalculatedAtom(StrictModel):
+    element: str
+    atom_index: int = Field(alias="atomIndex", ge=0)
+    x: float
+    y: float
+    z: float
+
+    @model_validator(mode="after")
+    def finite_coordinates(self) -> "CalculatedAtom":
+        if not all(math.isfinite(value) for value in (self.x, self.y, self.z)):
+            raise ValueError("계산 지점의 원자 좌표는 유한한 수여야 합니다")
+        return self
+
+
+class CalculatedImage(StrictModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True, frozen=True)
+    id: str
+    index: int = Field(ge=0)
+    atoms: list[CalculatedAtom]
+    energy_hartree: float | None = Field(default=None, alias="energyHartree")
+    relative_energy_kj_mol: float | None = Field(default=None, alias="relativeEnergyKjMol")
+    reaction_coordinate: float | None = Field(default=None, alias="reactionCoordinate")
+    gradient: list[list[float]] | None = None
+    wavefunction_ref: str | None = Field(default=None, alias="wavefunctionRef")
+    orbital_refs: dict[str, str] = Field(default_factory=dict, alias="orbitalRefs")
+    convergence: Literal["converged", "unconverged", "unknown"] = "unknown"
+
+    @model_validator(mode="after")
+    def finite_metadata(self) -> "CalculatedImage":
+        values = (self.energy_hartree, self.relative_energy_kj_mol, self.reaction_coordinate)
+        if any(value is not None and not math.isfinite(value) for value in values):
+            raise ValueError("계산 지점의 에너지와 반응좌표는 유한한 수여야 합니다")
+        if self.gradient is not None:
+            if len(self.gradient) != len(self.atoms) or any(len(row) != 3 for row in self.gradient):
+                raise ValueError("gradient는 원자마다 3개 성분을 가져야 합니다")
+            if any(not math.isfinite(value) for row in self.gradient for value in row):
+                raise ValueError("gradient에 NaN 또는 무한대가 있습니다")
+        return self
+
+
+class ReactionPathResult(StrictModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True, frozen=True)
+    schema_version: Literal[1] = Field(alias="schemaVersion")
+    source_type: Literal["imported", "neb", "irc", "relaxed-scan"] = Field(alias="sourceType")
+    atom_count: int = Field(alias="atomCount", ge=1)
+    elements: list[str]
+    charge: int | None = None
+    multiplicity: int | None = Field(default=None, ge=1)
+    images: list[CalculatedImage]
+    has_physical_time: Literal[False] = Field(default=False, alias="hasPhysicalTime")
+
+
+class DisplayFrame(StrictModel):
+    index: int = Field(ge=0)
+    left_image_index: int = Field(alias="leftImageIndex", ge=0)
+    right_image_index: int = Field(alias="rightImageIndex", ge=0)
+    interpolation_value: float = Field(alias="interpolationValue", ge=0, le=1)
+    coordinates: list[Vec3]
+    reaction_coordinate: float = Field(alias="reactionCoordinate", ge=0, le=1)
+    relative_energy_kj_mol: float | None = Field(default=None, alias="relativeEnergyKjMol")
+    is_calculated: bool = Field(alias="isCalculated")
+
+
+class ReactionPathPlayback(StrictModel):
+    path: ReactionPathResult
+    display_frames: list[DisplayFrame] = Field(alias="displayFrames")
+
+
+class OrbitalMatch(StrictModel):
+    left_orbital_id: str = Field(alias="leftOrbitalId")
+    right_orbital_id: str | None = Field(default=None, alias="rightOrbitalId")
+    signed_overlap: float | None = Field(default=None, alias="signedOverlap")
+    absolute_overlap: float | None = Field(default=None, alias="absoluteOverlap")
+    status: Literal["matched", "below-threshold", "ambiguous"]
+
+
 class SurfaceRequest(StrictModel):
     field: Literal["total_density", "mo"]
     orbital_index: int | None = None

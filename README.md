@@ -94,6 +94,31 @@ XYZ에는 결합 정보가 없으므로 import 후 결합을 다시 추론한다
 
 전체 전자 밀도와 MO는 서로 다른 field다. MO의 양/음 색은 확률의 양/음이 아니라 파동함수의 위상이다. opacity는 브라우저 속성이어서 mesh를 다시 만들지 않고, isovalue는 300 ms debounce 뒤 같은 Cube에서 contour만 다시 만든다.
 
+## 계산된 반응 경로 재생
+
+계산 설정의 `계산 종류`에서 `반응 경로`를 선택하면 현재 계산 작업의
+`data/jobs/<UUID>/reaction-path.json`을 불러올 수 있다. 이 모드는 NEB·IRC를 실행하지 않으며,
+표시 프레임은 실제 시간 trajectory가 아니다. 계산 프리셋과 계산 종류는 독립 상태다.
+
+manifest는 UTF-8 JSON이며 최상위 `schemaVersion: 1`, `energyUnit`(`hartree`, `kj/mol`, `eV`),
+`sourceType`, `atomCount`, `elements`, `charge`, `multiplicity`, `hasPhysicalTime: false`, `images`를
+가진다. 각 계산 지점은 연속된 `index`, 고유 `id`, 원자별 `element`, `atomIndex`, `x/y/z`,
+`energy` 또는 `energyHartree`, 선택적 `reactionCoordinate`, `wavefunctionRef`, `orbitalRefs`,
+`convergence`를 가진다. `wavefunctionRef`와 `orbitalRefs`의 값은 작업 디렉터리 기준 상대 경로만
+허용하며 절대 경로와 `..`를 거부한다. 파일이 빠진 경우 원자 경로는 재생하고 MO만 부분 실패로
+표시한다. 작은 전체 예시는 [테스트 fixture](tests/fixtures/reaction-path.json)에 있다.
+
+백엔드는 첫 계산 지점을 기준으로 질량 가중 Kabsch 정렬을 하고, 단조 반응좌표 또는 정렬 좌표의
+누적 길이를 0..1로 정규화한다. 표시 좌표는 구간별 cubic Hermite로 만들며 두 지점뿐인 경로,
+불안정한 접선·급격한 방향 반전, 과도한 overshoot, 새 원자 겹침, 비유한 결과에서는 해당 구간을
+선형 보간한다. 기본 구간 샘플 수는 `backend/app/reaction_path/geometry.py`의 한 상수로 관리한다.
+
+선택한 MO만 같은 spin의 ±5 후보에서 공통 cube 격자 signed overlap으로 추적한다. 절댓값 중첩이
+0.60 미만이면 branch를 영구 종료하고, 음의 signed overlap이면 다음 표시 field의 위상을 뒤집는다.
+위상 정렬한 scalar field를 먼저 보간한 뒤 각 표시 프레임의 등치면을 작업 디렉터리에 지연 생성한다.
+원본 cube는 수정하거나 삭제하지 않는다. 준축퇴 오비탈은 현재 단일 오비탈 배정만 사용하므로
+후속 부분공간 추적 확장 지점으로 남아 있다.
+
 ## 테스트와 검사
 
 ```powershell

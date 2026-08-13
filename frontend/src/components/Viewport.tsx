@@ -1,14 +1,17 @@
 import { Html, Line, OrbitControls, PerspectiveCamera, OrthographicCamera, TransformControls } from '@react-three/drei'
-import { Canvas, type ThreeEvent, useLoader, useThree } from '@react-three/fiber'
+import { Canvas, type ThreeEvent, useThree } from '@react-three/fiber'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
+import { Pause, Play } from 'lucide-react'
 import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js'
 import { angleDegrees, distance, normalize, stableAngleAxis, sub } from '../chem/geometry'
+import { advancePlaybackFrame, playbackStartFrame, REACTION_PLAYBACK_FRAME_MS } from '../chem/reactionPath'
 import { ELEMENTS } from '../chem/elements'
 import { useProjectStore, visibleProject } from '../store/projectStore'
 import type { Atom, Bond, SketchPlane, SurfaceLayer, Vec3 } from '../types'
 import { WeightedBlendedOIT } from './WeightedBlendedOIT'
 import { createOitSurfaceMaterial, OIT_LAYER, OIT_SURFACE_FLAG } from './weightedBlendedOitMaterial'
+import { api } from '../api/client'
 
 function BondMesh({ bond, atoms }: { bond: Bond; atoms: Atom[] }) {
   const a = atoms.find(x => x.id === bond.atomId1); const b = atoms.find(x => x.id === bond.atomId2)
@@ -66,7 +69,23 @@ function AngleMeasure({ atoms, ids }: { atoms: Atom[]; ids: string[] }) {
 }
 
 function SurfaceMesh({ layer, phase, url }: { layer: SurfaceLayer; phase: string; url: string }) {
-  const geometry = useLoader(PLYLoader, url); useMemo(() => geometry.computeVertexNormals(), [geometry])
+  const [geometry, setGeometry] = useState<THREE.BufferGeometry>()
+  const geometryRef = useRef<THREE.BufferGeometry | undefined>(undefined)
+  useEffect(() => {
+    let active = true
+    new PLYLoader().load(url, loaded => {
+      loaded.computeVertexNormals()
+      if (!active) { loaded.dispose(); return }
+      geometryRef.current?.dispose()
+      geometryRef.current = loaded
+      setGeometry(loaded)
+    })
+    return () => {
+      active = false
+      geometryRef.current?.dispose()
+      geometryRef.current = undefined
+    }
+  }, [url])
   const color = phase === 'positive' ? layer.positiveColor : layer.negativeColor
   const [material] = useState(() => createOitSurfaceMaterial(color, layer.opacity))
   useEffect(() => {
@@ -74,6 +93,7 @@ function SurfaceMesh({ layer, phase, url }: { layer: SurfaceLayer; phase: string
     material.uniforms.uOpacity.value = layer.opacity
   }, [color, layer.opacity, material])
   useEffect(() => () => material.dispose(), [material])
+  if (!geometry) return null
   return <mesh
     geometry={geometry}
     material={material}
@@ -104,20 +124,122 @@ function TransformGizmo({ atoms }: { atoms: Atom[] }) {
 }
 
 function Scene() {
-  const project = useProjectStore(visibleProject); const clear = useProjectStore(s => s.clearSelection); const tool = useProjectStore(s => s.tool); const toolAtoms = useProjectStore(s => s.toolAtoms); const surfaces = useProjectStore(s => s.surfaces); const orbitEnabled = useProjectStore(s => s.orbitEnabled)
+  const project = useProjectStore(visibleProject); const clear = useProjectStore(s => s.clearSelection); const tool = useProjectStore(s => s.tool); const toolAtoms = useProjectStore(s => s.toolAtoms); const surfaces = useProjectStore(s => s.surfaces); const orbitEnabled = useProjectStore(s => s.orbitEnabled); const reactionStatus = useProjectStore(s => s.reactionStatus)
   return <>
     <color attach="background" args={['#07111f']} /><ambientLight intensity={1.25} /><directionalLight position={[5, 8, 6]} intensity={2.2} castShadow /><directionalLight position={[-5, -3, -2]} intensity={.5} color="#4c8cff" />
     {project.displaySettings.perspective ? <PerspectiveCamera makeDefault position={[5, 4, 7]} fov={43} /> : <OrthographicCamera makeDefault position={[5, 4, 7]} zoom={75} />}
     <OrbitControls makeDefault enabled={orbitEnabled} enableDamping dampingFactor={.08} screenSpacePanning />
     <group onPointerMissed={() => clear()}>{project.sketchPlanes.map(p => <PlaneMesh key={p.id} plane={p} />)}{project.bonds.map(b => <BondMesh key={b.id} bond={b} atoms={project.atoms} />)}{project.atoms.map(a => <AtomMesh key={a.id} atom={a} />)}</group>
-    {tool === 'move' && <TransformGizmo atoms={project.atoms} />}
+    {tool === 'move' && reactionStatus !== 'playing' && <TransformGizmo atoms={project.atoms} />}
     {tool === 'distance' && <DistanceMeasure atoms={project.atoms} ids={toolAtoms} />}{tool === 'angle' && <AngleMeasure atoms={project.atoms} ids={toolAtoms} />}
     {surfaces.filter(s => s.visible && !s.loading).flatMap(layer => Object.entries(layer.meshUrls).map(([phase, url]) => <SurfaceMesh key={`${layer.key}-${phase}-${url}`} layer={layer} phase={phase} url={url} />))}
     <axesHelper args={[2]} visible={project.displaySettings.showAxes} /><FitController atoms={project.atoms} /><WeightedBlendedOIT />
   </>
 }
 
+export function ReactionPathControls() {
+  const calculationKind = useProjectStore(s => s.calculationKind)
+  const status = useProjectStore(s => s.reactionStatus)
+  const playback = useProjectStore(s => s.reactionPath)
+  const frameIndex = useProjectStore(s => s.reactionFrameIndex)
+  const setFrame = useProjectStore(s => s.setReactionFrame)
+  const setPlaying = useProjectStore(s => s.setReactionPlaying)
+  const error = useProjectStore(s => s.reactionError)
+  const selectedOrbital = useProjectStore(s => s.selectedOrbital)
+  const result = useProjectStore(s => s.result)
+  const [orbitalTrack, setOrbitalTrack] = useState<{ active: boolean; loading: boolean; error?: string; frameSurfaces?: Record<string, Record<string, string>> }>({ active: true, loading: false })
+  const orbitalRequest = useRef<AbortController | undefined>(undefined)
+  const upsertSurface = useProjectStore(s => s.upsertSurface)
+  const removeSurface = useProjectStore(s => s.removeSurface)
+  const reactionIsovalue = useProjectStore(s => s.surfaces.find(layer => layer.key === 'reaction-path-mo')?.isovalue ?? 0.03)
+  const requestRef = useRef<number | undefined>(undefined)
+  const previousTime = useRef(0)
+
+  useEffect(() => {
+    if (status !== 'playing' || !playback) return
+    const tick = (time: number) => {
+      if (!previousTime.current) previousTime.current = time
+      if (time - previousTime.current >= REACTION_PLAYBACK_FRAME_MS) {
+        previousTime.current = time
+        const state = useProjectStore.getState()
+        const next = advancePlaybackFrame(state.reactionFrameIndex, playback.displayFrames.length)
+        state.setReactionFrame(next.index)
+        if (!next.playing) state.setReactionPlaying(false)
+      }
+      if (useProjectStore.getState().reactionStatus === 'playing') requestRef.current = requestAnimationFrame(tick)
+    }
+    requestRef.current = requestAnimationFrame(tick)
+    return () => {
+      if (requestRef.current !== undefined) cancelAnimationFrame(requestRef.current)
+      requestRef.current = undefined
+      previousTime.current = 0
+    }
+  }, [status, playback])
+
+  useEffect(() => {
+    orbitalRequest.current?.abort()
+    if (!selectedOrbital || !result || !playback) {
+      setOrbitalTrack({ active: true, loading: false })
+      return
+    }
+    const controller = new AbortController(); orbitalRequest.current = controller
+    setOrbitalTrack({ active: true, loading: true })
+    api.reactionOrbitalTrack(result.job_id, selectedOrbital, reactionIsovalue, controller.signal).then(track => {
+      if (!controller.signal.aborted) setOrbitalTrack({ active: track.active, loading: false, frameSurfaces: track.frameSurfaces })
+    }).catch(error => {
+      if (!controller.signal.aborted) setOrbitalTrack({ active: false, loading: false, error: (error as Error).message })
+    })
+    return () => controller.abort()
+  }, [selectedOrbital, result, playback, reactionIsovalue, removeSurface])
+
+  useEffect(() => {
+    if (calculationKind !== 'reaction-path') removeSurface('reaction-path-mo')
+    return () => removeSurface('reaction-path-mo')
+  }, [calculationKind, removeSurface])
+
+  useEffect(() => {
+    if (!selectedOrbital || !playback || orbitalTrack.loading) return
+    const meshUrls = orbitalTrack.frameSurfaces?.[String(frameIndex)]
+    if (!meshUrls) {
+      removeSurface('reaction-path-mo')
+      return
+    }
+    const calculated = playback.displayFrames[frameIndex].isCalculated
+    upsertSurface({
+      key: 'reaction-path-mo', name: calculated ? '계산된 MO' : '보간된 MO', field: 'mo',
+      orbitalInternalId: selectedOrbital, spin: selectedOrbital.startsWith('alpha:') ? 'alpha' : selectedOrbital.startsWith('beta:') ? 'beta' : 'restricted',
+      visible: true, opacity: .55, isovalue: reactionIsovalue, positiveColor: '#45b8ff', negativeColor: '#ff6a8a', meshUrls, reactionFrame: true,
+    })
+  }, [selectedOrbital, playback, frameIndex, orbitalTrack, reactionIsovalue, upsertSurface, removeSurface])
+
+  if (calculationKind !== 'reaction-path') return null
+  if (!playback) return <div className="reaction-empty" role="status">
+    <strong>계산된 반응 경로가 없습니다.</strong>
+    <span>{status === 'loading-path' ? '기존 결과를 불러오는 중입니다…' : '현재 단계에서는 기존 반응 경로 결과를 불러와 재생할 수 있습니다.'}</span>
+    {error && <em>{error}</em>}
+  </div>
+  const frame = playback.displayFrames[frameIndex]
+  const atEnd = frameIndex === playback.displayFrames.length - 1
+  const toggle = () => {
+    if (status === 'playing') return setPlaying(false)
+    if (atEnd) setFrame(playbackStartFrame(frameIndex, playback.displayFrames.length))
+    setPlaying(true)
+  }
+  const pointText = frame.isCalculated
+    ? `계산 지점 ${frame.leftImageIndex + 1}/${playback.path.images.length}`
+    : `보간됨 · 지점 ${frame.leftImageIndex + 1}→${frame.rightImageIndex + 1}`
+  return <div className="reaction-controls" aria-label="반응 경로 재생">
+    <button className="reaction-play" onClick={toggle} aria-label={status === 'playing' ? '일시정지' : '재생'}>{status === 'playing' ? <Pause /> : <Play />}</button>
+    <input aria-label="반응 경로 프레임" type="range" min="0" max={playback.displayFrames.length - 1} step="1" value={frameIndex} onChange={event => { setPlaying(false); setFrame(Number(event.target.value)) }} />
+    <div className="reaction-frame-info"><strong>{pointText}</strong><span>경로 위치 {(frame.reactionCoordinate * 100).toFixed(1)}%</span></div>
+    <div className="reaction-energy">{frame.relativeEnergyKjMol == null ? '에너지 없음' : `${frame.relativeEnergyKjMol.toFixed(2)} kJ/mol${frame.isCalculated ? '' : ' · 보간값'}`}</div>
+    {selectedOrbital && orbitalTrack.loading && <div className="reaction-mo-warning">선택한 MO의 cube와 중첩을 준비하는 중…</div>}
+    {selectedOrbital && !orbitalTrack.loading && !orbitalTrack.active && <div className="reaction-mo-warning">{orbitalTrack.error ?? '대응 오비탈 없음 — 추적 종료'} · 원자 경로는 계속 재생됩니다.</div>}
+    <p>계산 경로의 시각적 보간이며 프레임 간격은 실제 시간이 아닙니다.</p>
+  </div>
+}
+
 export function Viewport() {
   const perspective = useProjectStore(s => s.project.displaySettings.perspective); const update = useProjectStore(s => s.updateProject); const project = useProjectStore(s => s.project)
-  return <><Canvas key={perspective ? 'p' : 'o'} dpr={[1, 2]} gl={{ antialias: true, alpha: false }}><Scene /></Canvas><div className="viewport-badge"><button onClick={() => update({ displaySettings: { ...project.displaySettings, perspective: !perspective } })}>{perspective ? 'Perspective' : 'Orthographic'}</button><span>Å</span></div></>
+  return <><Canvas key={perspective ? 'p' : 'o'} dpr={[1, 2]} gl={{ antialias: true, alpha: false }}><Scene /></Canvas><div className="viewport-badge"><button onClick={() => update({ displaySettings: { ...project.displaySettings, perspective: !perspective } })}>{perspective ? 'Perspective' : 'Orthographic'}</button><span>Å</span></div><ReactionPathControls /></>
 }

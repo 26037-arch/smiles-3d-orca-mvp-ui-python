@@ -28,13 +28,51 @@ function SelectedAtomPanel() {
 function CalculationSettings({ capabilities }: { capabilities?: Capabilities }) {
   const project = useProjectStore(s => s.project); const update = useProjectStore(s => s.updateProject)
   const setNotice = useProjectStore(s => s.setNotice); const setError = useProjectStore(s => s.setError)
+  const calculationKind = useProjectStore(s => s.calculationKind); const setCalculationKind = useProjectStore(s => s.setCalculationKind)
+  const reactionStatus = useProjectStore(s => s.reactionStatus); const reactionError = useProjectStore(s => s.reactionError)
+  const result = useProjectStore(s => s.result)
+  const pathRequest = useRef<AbortController | undefined>(undefined)
   const [presets, setPresets] = useState<any[]>([]); useEffect(() => { api.presets().then(setPresets).catch(() => {}) }, [])
   const [orcaPath, setOrcaPath] = useState(capabilities?.orca.path ?? '')
   useEffect(() => setOrcaPath(capabilities?.orca.path ?? ''), [capabilities?.orca.path])
   const electrons = project.atoms.reduce((sum, atom) => sum + ELEMENTS[atom.element].atomicNumber, 0) - project.totalCharge
   const parityOk = electrons % 2 === (project.multiplicity - 1) % 2
   const savePath = async () => { try { await api.setOrcaPath(orcaPath.trim() || null); setNotice('ORCA 경로를 로컬 설정에 저장했습니다.'); window.setTimeout(() => window.location.reload(), 400) } catch (e) { setError((e as Error).message) } }
-  return <div className="settings-grid"><label>전체 전하<input type="number" min="-20" max="20" value={project.totalCharge} onChange={e => update({ totalCharge: Number(e.target.value) })} /></label><label>스핀 다중도<input type="number" min="1" max="20" value={project.multiplicity} onChange={e => update({ multiplicity: Number(e.target.value) })} /></label><label className="full">계산 프리셋<select value={project.calculationPreset} onChange={e => update({ calculationPreset: e.target.value })}>{presets.map(p => <option key={p.id} value={p.id}>{p.name} · 비용 {p.cost}</option>)}</select></label><div className={`validation-line full ${parityOk ? 'ok' : 'bad'}`}>{parityOk ? <CheckCircle2 /> : <CircleAlert />}전자 수 {electrons} · {parityOk ? '다중도 parity 일치' : '전하·다중도 parity 불일치'}</div>{presets.filter(p => p.id === project.calculationPreset).map(p => <div key={p.id} className="preset-card full"><strong>{p.purpose}</strong><code>! {p.optimization_keywords.join(' ')}</code>{p.single_point_keywords.join(' ') !== p.optimization_keywords.join(' ') && <code>! {p.single_point_keywords.join(' ')}</code>}</div>)}<p className="help full">음이온·열린껍질·전이금속에서는 기본 프리셋이 부적절할 수 있습니다. 화학 상태를 앱이 추측하지 않습니다.</p><label className="full">ORCA 실행 파일 경로<div className="path-field"><input value={orcaPath} placeholder="C:\\Program Files\\ORCA_6.1.1\\orca.exe" onChange={e => setOrcaPath(e.target.value)} /><button onClick={savePath}>저장</button></div></label><div className="capability full"><span className={capabilities?.calculation.available ? 'dot good' : 'dot bad'} />{capabilities?.calculation.available ? `ORCA ${capabilities.orca.version} · OPI ${capabilities.opi.version}` : capabilities?.calculation.reasons.join(' · ') || '진단 중'}</div></div>
+  useEffect(() => () => pathRequest.current?.abort(), [])
+  const loadReactionPath = async () => {
+    const jobId = result?.job_id ?? project.lastCalculationId
+    if (!jobId) return setError('반응 경로를 읽을 계산 작업이 없습니다.')
+    pathRequest.current?.abort()
+    const controller = new AbortController(); pathRequest.current = controller
+    useProjectStore.getState().beginReactionPathLoad()
+    try {
+      const playback = await api.reactionPath(jobId, controller.signal)
+      if (pathRequest.current !== controller) return
+      useProjectStore.getState().applyReactionPath(playback)
+    } catch (error) {
+      if (controller.signal.aborted) return
+      useProjectStore.getState().failReactionPath((error as Error).message)
+    }
+  }
+  return <div className="settings-grid">
+    <label className="full">계산 종류<div className="calculation-kind" role="group" aria-label="계산 종류">
+      <button className={calculationKind === 'single' ? 'active' : ''} onClick={() => { pathRequest.current?.abort(); setCalculationKind('single') }}>단일 구조</button>
+      <button className={calculationKind === 'reaction-path' ? 'active' : ''} onClick={() => setCalculationKind('reaction-path')}>반응 경로</button>
+    </div></label>
+    <label>전체 전하<input type="number" min="-20" max="20" value={project.totalCharge} onChange={e => update({ totalCharge: Number(e.target.value) })} /></label>
+    <label>스핀 다중도<input type="number" min="1" max="20" value={project.multiplicity} onChange={e => update({ multiplicity: Number(e.target.value) })} /></label>
+    <label className="full">계산 프리셋<select value={project.calculationPreset} onChange={e => update({ calculationPreset: e.target.value })}>{presets.map(p => <option key={p.id} value={p.id}>{p.name} · 비용 {p.cost}</option>)}</select></label>
+    {calculationKind === 'reaction-path' && <div className="reaction-import full">
+      <button className="wide" disabled={reactionStatus === 'loading-path'} onClick={() => void loadReactionPath()}>{reactionStatus === 'loading-path' ? '경로 불러오는 중…' : '현재 작업의 reaction-path.json 불러오기'}</button>
+      <p className="help">NEB·IRC를 실행하지 않고 작업 디렉터리의 기존 결과만 읽습니다.</p>
+      {reactionError && <p className="inline-error">{reactionError}</p>}
+    </div>}
+    <div className={`validation-line full ${parityOk ? 'ok' : 'bad'}`}>{parityOk ? <CheckCircle2 /> : <CircleAlert />}전자 수 {electrons} · {parityOk ? '다중도 parity 일치' : '전하·다중도 parity 불일치'}</div>
+    {presets.filter(p => p.id === project.calculationPreset).map(p => <div key={p.id} className="preset-card full"><strong>{p.purpose}</strong><code>! {p.optimization_keywords.join(' ')}</code>{p.single_point_keywords.join(' ') !== p.optimization_keywords.join(' ') && <code>! {p.single_point_keywords.join(' ')}</code>}</div>)}
+    <p className="help full">음이온·열린껍질·전이금속에서는 기본 프리셋이 부적절할 수 있습니다. 화학 상태를 앱이 추측하지 않습니다.</p>
+    <label className="full">ORCA 실행 파일 경로<div className="path-field"><input value={orcaPath} placeholder="C:\\Program Files\\ORCA_6.1.1\\orca.exe" onChange={e => setOrcaPath(e.target.value)} /><button onClick={savePath}>저장</button></div></label>
+    <div className="capability full"><span className={capabilities?.calculation.available ? 'dot good' : 'dot bad'} />{capabilities?.calculation.available ? `ORCA ${capabilities.orca.version} · OPI ${capabilities.opi.version}` : capabilities?.calculation.reasons.join(' · ') || '진단 중'}</div>
+  </div>
 }
 
 function BondsAndPlanes() {
@@ -48,6 +86,10 @@ function SurfaceControl({ layer }: { layer: SurfaceLayer }) {
   const [isovalue, setIso] = useState(layer.isovalue)
   useEffect(() => {
     if (!result || !layer.visible) return
+    if (layer.reactionFrame) {
+      if (Math.abs(layer.isovalue - isovalue) > 1e-12) upsert({ ...layer, isovalue })
+      return
+    }
     const timer = window.setTimeout(async () => {
       const pending = { ...layer, isovalue, loading: true, error: undefined }; upsert(pending)
       try { const response = await api.surface(result.job_id, surfaceRequestForLayer(pending)); upsert({ ...pending, loading: false, meshUrls: response.mesh_urls, cacheHit: response.cache_hit }) }
@@ -57,12 +99,13 @@ function SurfaceControl({ layer }: { layer: SurfaceLayer }) {
     // layer key identifies stable controls; opacity is renderer-only and intentionally excluded.
   // The layer object is replaced by upsert; primitive request inputs are the trigger.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isovalue, layer.visible, result?.job_id])
+  }, [isovalue, layer.visible, layer.reactionFrame, result?.job_id])
   return <div className="surface-card"><div><input type="checkbox" checked={layer.visible} onChange={e => upsert({ ...layer, visible: e.target.checked })} /><strong>{layer.name}</strong>{layer.loading && <span className="tiny-status">생성 중</span>}{layer.cacheHit && <span className="tiny-status cache">cache</span>}<button className="icon-button" onClick={() => remove(layer.key)}><Trash2 /></button></div><label>등밀도값 <input type="number" min="0.0001" step="0.005" value={isovalue} onChange={e => setIso(Math.max(.0001, Number(e.target.value)))} /></label><input aria-label="등밀도값 로그 슬라이더" type="range" min="-4" max="-0.3" step="0.02" value={Math.log10(isovalue)} onChange={e => setIso(10 ** Number(e.target.value))} /><label>투명도 <b>{layer.opacity.toFixed(2)}</b><input type="range" min="0" max="1" step="0.01" value={layer.opacity} onChange={e => upsert({ ...layer, opacity: Number(e.target.value) })} /></label>{layer.error && <p className="inline-error">{layer.error}</p>}</div>
 }
 
 function SurfacesPanel() {
   const result = useProjectStore(s => s.result); const layers = useProjectStore(s => s.surfaces); const upsert = useProjectStore(s => s.upsertSurface); const selected = useProjectStore(s => s.selectedOrbital); const setSelected = useProjectStore(s => s.setSelectedOrbital); const setError = useProjectStore(s => s.setError)
+  const calculationKind = useProjectStore(s => s.calculationKind)
   const [extraOrbitalId, setExtraOrbitalId] = useState('')
   const frontier = useMemo(() => frontierOrbitals(result?.orbitals ?? [], result?.homo_internal_id), [result])
   const extraOrbital = result?.orbitals.find(orbital => orbital.internal_id === extraOrbitalId)
@@ -71,6 +114,7 @@ function SurfacesPanel() {
   }, [result?.job_id, result?.orbitals, selected])
   const addLayer = (orbital?: Orbital) => {
     if (orbital) setSelected(orbital.internal_id)
+    if (calculationKind === 'reaction-path' && orbital) return
     if (!result) return setError('먼저 계산 결과가 필요합니다')
     const update = toggleSurfaceLayer(layers, orbital)
     if (update.error) return setError(update.error)

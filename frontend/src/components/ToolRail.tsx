@@ -13,9 +13,10 @@ const tools: { id: Tool; label: string; icon: typeof MousePointer2 }[] = [
 export function ToolRail() {
   const tool = useProjectStore(s => s.tool); const setTool = useProjectStore(s => s.setTool)
   const toolAtoms = useProjectStore(s => s.toolAtoms); const createPlane = useProjectStore(s => s.createThreeAtomPlane)
+  const reactionStatus = useProjectStore(s => s.reactionStatus)
   const result = useProjectStore(s => s.result); const analysisMode = useAnalysisStore(s => s.mode); const setAnalysisMode = useAnalysisStore(s => s.setMode)
   return <aside className="toolrail" aria-label="편집 도구">
-    {tools.map(item => <button key={item.id} className={tool === item.id ? 'active' : ''} onClick={() => setTool(item.id)} title={item.label}><item.icon /><span>{item.label}</span></button>)}
+    {tools.map(item => <button key={item.id} className={tool === item.id ? 'active' : ''} disabled={reactionStatus === 'playing' && ['add', 'move', 'plane', 'bond-add', 'bond-delete'].includes(item.id)} onClick={() => setTool(item.id)} title={item.label}><item.icon /><span>{item.label}</span></button>)}
     {tool === 'plane' && toolAtoms.length === 3 && <button className="confirm-tool" onClick={() => createPlane(toolAtoms)}><Atom /><span>세 원자 평면 생성</span></button>}
     <button className={analysisMode === 'plot' ? 'active' : ''} disabled={!result || result.demo} onClick={() => setAnalysisMode(analysisMode === 'plot' ? 'model' : 'plot')} title={result?.demo ? '데모 결과에는 실제 파동함수가 없습니다' : '파동함수 그래프'}><ChartNoAxesCombined /><span>파동함수</span></button>
     <span className="rail-spacer" /><button title="화면 맞춤" onClick={() => window.dispatchEvent(new CustomEvent('fit-molecule'))}><Expand /><span>화면 맞춤</span></button>

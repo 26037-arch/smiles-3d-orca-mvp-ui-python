@@ -21,6 +21,9 @@ export default function App() {
   const [bottomPanelHeight, setBottomPanelHeight] = useState(DEFAULT_BOTTOM_PANEL_HEIGHT)
   const error = useProjectStore(s => s.error); const notice = useProjectStore(s => s.notice)
   const setError = useProjectStore(s => s.setError); const setNotice = useProjectStore(s => s.setNotice)
+  const reactionCopyPrompt = useProjectStore(s => s.reactionCopyPrompt)
+  const copyReactionFrameToSingle = useProjectStore(s => s.copyReactionFrameToSingle)
+  const dismissReactionCopyPrompt = useProjectStore(s => s.dismissReactionCopyPrompt)
   const analysisMode = useAnalysisStore(s => s.mode)
 
   useEffect(() => { api.capabilities().then(setCapabilities).catch(e => setError(`백엔드 연결 실패: ${e.message}`)) }, [setError])
@@ -84,5 +87,10 @@ export default function App() {
       {error && <AlertTriangle size={18} />}<span>{error ?? notice}</span>
       <button className="icon-button" onClick={() => { setError(); setNotice() }} aria-label="닫기"><X size={16} /></button>
     </div>}
+    {reactionCopyPrompt && <div className="modal-backdrop" role="presentation"><div className="reaction-copy-dialog" role="dialog" aria-modal="true" aria-labelledby="reaction-copy-title">
+      <h2 id="reaction-copy-title">계산된 반응 경로의 구조입니다</h2>
+      <p>현재 구조를 새 단일 구조로 복사하면 기존 반응 경로와 분리됩니다.</p>
+      <div><button className="primary" onClick={copyReactionFrameToSingle}>새 구조로 복사</button><button onClick={dismissReactionCopyPrompt}>취소</button></div>
+    </div></div>}
   </main>
 }

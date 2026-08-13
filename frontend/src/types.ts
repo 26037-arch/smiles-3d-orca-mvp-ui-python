@@ -50,6 +50,64 @@ export interface MoleculeProject {
 }
 
 export type OrbitalSpin = 'restricted' | 'alpha' | 'beta'
+export type CalculationKind = 'single' | 'reaction-path'
+export type ReactionPathStatus = 'idle' | 'loading-path' | 'ready' | 'loading-orbitals' | 'preparing-display-frames' | 'playing' | 'paused' | 'error'
+
+export interface CalculatedImageAtom {
+  element: string
+  atomIndex: number
+  x: number
+  y: number
+  z: number
+}
+
+export interface CalculatedImage {
+  id: string
+  index: number
+  atoms: CalculatedImageAtom[]
+  energyHartree: number | null
+  relativeEnergyKjMol: number | null
+  reactionCoordinate: number | null
+  gradient?: number[][]
+  wavefunctionRef?: string
+  orbitalRefs: Record<string, string>
+  convergence: 'converged' | 'unconverged' | 'unknown'
+}
+
+export interface ReactionPathResult {
+  schemaVersion: 1
+  sourceType: 'imported' | 'neb' | 'irc' | 'relaxed-scan'
+  atomCount: number
+  elements: string[]
+  charge: number | null
+  multiplicity: number | null
+  images: CalculatedImage[]
+  hasPhysicalTime: false
+}
+
+export interface DisplayFrame {
+  index: number
+  leftImageIndex: number
+  rightImageIndex: number
+  interpolationValue: number
+  coordinates: Vec3[]
+  reactionCoordinate: number
+  relativeEnergyKjMol: number | null
+  isCalculated: boolean
+}
+
+export interface ReactionPathPlayback {
+  path: ReactionPathResult
+  displayFrames: DisplayFrame[]
+}
+
+export interface OrbitalMatch {
+  leftOrbitalId: string
+  rightOrbitalId: string | null
+  signedOverlap: number | null
+  absoluteOverlap: number | null
+  status: 'matched' | 'below-threshold' | 'ambiguous'
+}
 
 export interface Orbital {
   internal_id: string
@@ -92,6 +150,7 @@ export interface SurfaceLayer {
   loading?: boolean
   cacheHit?: boolean
   error?: string
+  reactionFrame?: boolean
 }
 
 export interface Capabilities {

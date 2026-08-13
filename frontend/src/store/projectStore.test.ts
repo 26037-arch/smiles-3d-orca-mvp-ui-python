@@ -3,6 +3,21 @@ import { newProject, useProjectStore } from './projectStore'
 import { angleDegrees, distance } from '../chem/geometry'
 import type { MoleculeProject } from '../types'
 
+const reactionPlayback = () => ({
+  path: {
+    schemaVersion: 1 as const, sourceType: 'imported' as const, atomCount: 2, elements: ['H', 'H'], charge: 0,
+    multiplicity: 1, hasPhysicalTime: false as const, images: [0, 1].map(index => ({
+      id: `p${index}`, index, atoms: [], energyHartree: null, relativeEnergyKjMol: null,
+      reactionCoordinate: index, orbitalRefs: {}, convergence: 'converged' as const,
+    })),
+  },
+  displayFrames: [0, 1, 2].map((index) => ({
+    index, leftImageIndex: index === 2 ? 1 : 0, rightImageIndex: 1,
+    interpolationValue: index / 2, coordinates: [[0, 0, 0], [0.7 + index * .1, 0, 0]] as [[number, number, number], [number, number, number]],
+    reactionCoordinate: index / 2, relativeEnergyKjMol: index, isCalculated: index !== 1,
+  })),
+})
+
 beforeEach(() => useProjectStore.getState().setProject(newProject()))
 
 describe('selection and command history', () => {
@@ -73,5 +88,41 @@ describe('AO mode surface lifecycle', () => {
 
     useProjectStore.getState().exitAOMode()
     expect(useProjectStore.getState().surfaces).toEqual([first, selected, density])
+  })
+})
+
+describe('reaction path state', () => {
+  it('keeps calculation kind independent from the calculation preset', () => {
+    useProjectStore.getState().updateProject({ calculationPreset: 'standard' })
+    useProjectStore.getState().setCalculationKind('reaction-path')
+    expect(useProjectStore.getState().project.calculationPreset).toBe('standard')
+    expect(useProjectStore.getState().calculationKind).toBe('reaction-path')
+  })
+
+  it('synchronizes slider frames and distinguishes calculated frames', () => {
+    const project = newProject(); project.atoms = [
+      { id: 'a', element: 'H', position: [0, 0, 0] }, { id: 'b', element: 'H', position: [.7, 0, 0] },
+    ]
+    useProjectStore.getState().setProject(project)
+    useProjectStore.getState().applyReactionPath(reactionPlayback())
+    useProjectStore.getState().setReactionFrame(1)
+    const state = useProjectStore.getState()
+    expect(state.reactionProject?.atoms[1].position[0]).toBeCloseTo(.8)
+    expect(state.reactionPath?.displayFrames[1].isCalculated).toBe(false)
+  })
+
+  it('blocks path coordinate edits and can copy the current frame to a single structure', () => {
+    const project = newProject(); project.name = 'Path'; project.atoms = [
+      { id: 'a', element: 'H', position: [0, 0, 0] }, { id: 'b', element: 'H', position: [.7, 0, 0] },
+    ]
+    useProjectStore.getState().setProject(project)
+    useProjectStore.getState().applyReactionPath(reactionPlayback())
+    useProjectStore.getState().setReactionFrame(2)
+    useProjectStore.getState().updateVisibleAtom('b', { position: [9, 0, 0] })
+    expect(useProjectStore.getState().reactionCopyPrompt).toBe(true)
+    expect(useProjectStore.getState().reactionProject?.atoms[1].position[0]).toBeCloseTo(.9)
+    useProjectStore.getState().copyReactionFrameToSingle()
+    expect(useProjectStore.getState().calculationKind).toBe('single')
+    expect(useProjectStore.getState().project.atoms[1].position[0]).toBeCloseTo(.9)
   })
 })
