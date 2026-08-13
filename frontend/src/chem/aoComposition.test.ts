@@ -4,6 +4,7 @@ import {
   appendCompositionItems,
   basisSurfaceKey,
   createBasisSurfaceLayer,
+  deselectIncomingBasis,
   initialBasisSelection,
   isCurrentAORequest,
 } from './aoComposition'
@@ -47,6 +48,7 @@ describe('AO composition presentation helpers', () => {
       0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
     ])
     expect([...initialBasisSelection(initial)]).toEqual([0, 1, 2, 3, 4])
+    expect([...deselectIncomingBasis(new Set([0, 1, 5, 6]), next)]).toEqual([0, 1])
   })
 
   it('rejects late or aborted request generations', () => {

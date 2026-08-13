@@ -3,7 +3,7 @@ import { Activity, Atom as AtomIcon, CheckCircle2, ChevronDown, CircleAlert, Eye
 import { api } from '../api/client'
 import { ELEMENTS, normalizeElement } from '../chem/elements'
 import { createSurfaceLayer, frontierOrbitals, orbitalOptionLabel, selectedOrbitalIdForBrowser, surfaceRequestForLayer, toggleSurfaceLayer } from '../chem/orbitals'
-import { AO_PAGE_SIZE, appendCompositionItems, createBasisSurfaceLayer, initialBasisSelection, isCurrentAORequest } from '../chem/aoComposition'
+import { AO_PAGE_SIZE, appendCompositionItems, createBasisSurfaceLayer, deselectIncomingBasis, initialBasisSelection, isCurrentAORequest } from '../chem/aoComposition'
 import { useProjectStore, visibleProject } from '../store/projectStore'
 import type { BasisContribution, Capabilities, Orbital, OrbitalComposition, SurfaceLayer, Vec3 } from '../types'
 
@@ -214,6 +214,12 @@ function AOCompositionPanel({ capabilities }: { capabilities?: Capabilities }) {
       )
       if (generation.current !== requestGeneration) return
       setItems(current => appendCompositionItems(current, page.items))
+      setChecked(current => deselectIncomingBasis(current, page.items))
+      for (const item of page.items) {
+        const key = createBasisSurfaceLayer(selected, item).key
+        const existing = useProjectStore.getState().surfaces.find(layer => layer.key === key)
+        if (existing) upsert({ ...existing, visible: false })
+      }
       setComposition(page)
     } catch (error) {
       if (generation.current === requestGeneration) setLocalError((error as Error).message)
@@ -273,17 +279,18 @@ function AOCompositionPanel({ capabilities }: { capabilities?: Capabilities }) {
       <div className="ao-ranked-heading">기저함수 기여 순위</div>
       <div className="ao-ranked-list">
         {items.map(item => {
+          const isChecked = checked.has(item.basis_index)
           const layer = layers.find(candidate => candidate.key === createBasisSurfaceLayer(selected, item).key)
           return <label key={item.basis_index}>
-            <input type="checkbox" checked={checked.has(item.basis_index)} onChange={() => toggleBasis(item)} />
+            <input type="checkbox" checked={isChecked} onChange={() => toggleBasis(item)} />
             <span><b>{item.atom_label} · {item.shell_label}</b><small>Cμ {item.coefficient >= 0 ? '+' : ''}{item.coefficient.toFixed(3)} · Löwdin {item.percentage.toFixed(1)}%</small></span>
             <i>{item.phase}</i>
-            {layer?.loading && <em>생성 중</em>}
-            {layer?.error && <em className="bad" title={layer.error}>{layer.error}</em>}
+            {isChecked && layer?.loading && <em>생성 중</em>}
+            {isChecked && layer?.error && <em className="bad" title={layer.error}>{layer.error}</em>}
           </label>
         })}
       </div>
-      {composition.has_more && <button className="wide" disabled={loading} onClick={() => void loadMore()}>5개 더 보기</button>}
+      {composition.has_more && <button className="wide ao-load-more" disabled={loading} onClick={() => void loadMore()}>5개 더 보기</button>}
     </>}
   </div>
 }

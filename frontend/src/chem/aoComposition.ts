@@ -40,6 +40,15 @@ export const initialBasisSelection = (items: BasisContribution[]) => new Set(
   items.slice(0, AO_PAGE_SIZE).map(item => item.basis_index),
 )
 
+export const deselectIncomingBasis = (
+  current: Set<number>,
+  incoming: BasisContribution[],
+) => {
+  const next = new Set(current)
+  for (const item of incoming) next.delete(item.basis_index)
+  return next
+}
+
 export const isCurrentAORequest = (
   currentGeneration: number,
   requestGeneration: number,
