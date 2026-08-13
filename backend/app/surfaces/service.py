@@ -20,18 +20,36 @@ class SurfaceService:
         job_dir = self.jobs._job_dir(job_id)
         surfaces = job_dir / "surfaces"
         surfaces.mkdir(exist_ok=True)
-        phases = ["positive"] if request.field == "total_density" else (
+        requested_phases = ["positive"] if request.field == "total_density" else (
             ["positive", "negative"] if request.display_mode == "both" else [request.display_mode]
         )
+
+        cube = None
+        if record.mode == JobMode.DEMO:
+            cube_hash = "demo-v1"
+            phases = requested_phases
+        else:
+            cube_path = self._find_or_generate_cube(job_dir, request)
+            cube_hash = hashlib.sha256(cube_path.read_bytes()).hexdigest()
+            cube = read_cube(cube_path)
+            phases = [
+                phase
+                for phase in requested_phases
+                if (
+                    phase == "positive" and float(cube.values.max()) >= request.isovalue
+                )
+                or (
+                    phase == "negative" and float(cube.values.min()) <= -request.isovalue
+                )
+            ]
+
+        if not phases:
+            raise ValueError("요청한 등밀도값에서 표면이 비어 있습니다")
+
         urls: dict[str, str] = {}
         all_hit = True
         ids: list[str] = []
         for phase in phases:
-            if record.mode == JobMode.DEMO:
-                cube_hash = "demo-v1"
-            else:
-                cube_path = self._find_or_generate_cube(job_dir, request)
-                cube_hash = hashlib.sha256(cube_path.read_bytes()).hexdigest()
             key = cache_key(cube_hash, request.field, request.orbital_index, request.spin, phase, request.isovalue)
             ids.append(key)
             output = surfaces / f"{key}.ply"
@@ -43,7 +61,7 @@ class SurfaceService:
                         orbital=request.orbital_index or 0,
                     )
                 else:
-                    cube = read_cube(cube_path)
+                    assert cube is not None
                     level = request.isovalue if phase == "positive" else -request.isovalue
                     contour_to_ply(cube, level, output)
             urls[phase] = f"/api/jobs/{job_id}/surfaces/{key}/mesh"
