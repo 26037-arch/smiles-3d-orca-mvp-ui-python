@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Activity, Atom as AtomIcon, CheckCircle2, ChevronDown, CircleAlert, Eye, EyeOff, FlaskConical, Layers3, Plus, RefreshCcw, Settings2, Trash2 } from 'lucide-react'
 import { api } from '../api/client'
 import { ELEMENTS, normalizeElement } from '../chem/elements'
+import { frontierOrbitals, orbitalOptionLabel, surfaceRequestForLayer, toggleSurfaceLayer } from '../chem/orbitals'
 import { useProjectStore, visibleProject } from '../store/projectStore'
 import type { Capabilities, Orbital, SurfaceLayer, Vec3 } from '../types'
 
@@ -48,7 +49,7 @@ function SurfaceControl({ layer }: { layer: SurfaceLayer }) {
     if (!result || !layer.visible) return
     const timer = window.setTimeout(async () => {
       const pending = { ...layer, isovalue, loading: true, error: undefined }; upsert(pending)
-      try { const response = await api.surface(result.job_id, { field: layer.field, orbital_index: layer.orbitalIndex, spin: 'restricted', isovalue, opacity: layer.opacity, display_mode: 'both' }); upsert({ ...pending, loading: false, meshUrls: response.mesh_urls, cacheHit: response.cache_hit }) }
+      try { const response = await api.surface(result.job_id, surfaceRequestForLayer(pending)); upsert({ ...pending, loading: false, meshUrls: response.mesh_urls, cacheHit: response.cache_hit }) }
       catch (e) { upsert({ ...pending, loading: false, error: (e as Error).message }) }
     }, 300)
     return () => window.clearTimeout(timer)
@@ -61,15 +62,19 @@ function SurfaceControl({ layer }: { layer: SurfaceLayer }) {
 
 function SurfacesPanel() {
   const result = useProjectStore(s => s.result); const layers = useProjectStore(s => s.surfaces); const upsert = useProjectStore(s => s.upsertSurface); const selected = useProjectStore(s => s.selectedOrbital); const setSelected = useProjectStore(s => s.setSelectedOrbital); const setError = useProjectStore(s => s.setError)
-  const frontier = useMemo(() => result?.orbitals.filter(o => o.label || Math.abs(o.orca_index - (result.orbitals.find(x => x.internal_id === result.homo_internal_id)?.orca_index ?? 0)) <= 2) ?? [], [result])
+  const [extraOrbitalId, setExtraOrbitalId] = useState('')
+  const frontier = useMemo(() => frontierOrbitals(result?.orbitals ?? [], result?.homo_internal_id), [result])
+  const extraOrbital = result?.orbitals.find(orbital => orbital.internal_id === extraOrbitalId)
+  useEffect(() => setExtraOrbitalId(''), [result?.job_id])
   const addLayer = (orbital?: Orbital) => {
-    if (!result) return setError('먼저 계산 결과가 필요합니다'); if (layers.filter(l => l.visible).length >= 6) return setError('동시에 표시할 수 있는 표면은 최대 6개입니다')
-    const key = orbital ? `mo:${orbital.orca_index}` : 'total_density'; const existing = layers.find(l => l.key === key)
-    upsert(existing ? { ...existing, visible: !existing.visible } : { key, name: orbital ? `${orbital.label ?? `MO ${orbital.display_number}`} · ORCA index ${orbital.orca_index}` : '전체 전자 밀도', field: orbital ? 'mo' : 'total_density', orbitalIndex: orbital?.orca_index, visible: true, opacity: .55, isovalue: orbital ? .03 : .05, positiveColor: orbital ? '#3d80ff' : '#52c9a8', negativeColor: '#ff4f87', meshUrls: {} })
     if (orbital) setSelected(orbital.internal_id)
+    if (!result) return setError('먼저 계산 결과가 필요합니다')
+    const update = toggleSurfaceLayer(layers, orbital)
+    if (update.error) return setError(update.error)
+    if (update.layer) upsert(update.layer)
   }
   if (!result) return <p className="empty-state">계산 결과가 없으므로 표면을 만들 수 없습니다. ORCA가 없으면 명시적인 데모 결과로 UI를 시험할 수 있습니다.</p>
-  return <><button className="wide surface-add" onClick={() => addLayer()}><Layers3 /> 전체 전자 밀도 켜기/끄기</button><p className="help">MO의 ± 색은 확률 부호가 아니라 파동함수의 위상입니다. 전체 전자 밀도는 별도 scalar field입니다.</p><div className="orbital-chips">{frontier.map(o => <button key={o.internal_id} className={selected === o.internal_id ? 'active' : ''} onClick={() => addLayer(o)}>{o.label ?? `MO ${o.display_number}`}<small>{(o.energy_hartree * 27.211386).toFixed(2)} eV</small></button>)}</div>{layers.map(layer => <SurfaceControl key={layer.key} layer={layer} />)}</>
+  return <><button className="wide surface-add" onClick={() => addLayer()}><Layers3 /> 전체 전자 밀도 켜기/끄기</button><p className="help">MO의 ± 색은 확률 부호가 아니라 파동함수의 위상입니다. 전체 전자 밀도는 별도 scalar field입니다.</p><div className="mo-list-heading">Frontier orbitals</div><div className="orbital-chips">{frontier.map(o => <button key={o.internal_id} className={selected === o.internal_id ? 'active' : ''} onClick={() => addLayer(o)}>{o.spin === 'alpha' ? 'α ' : o.spin === 'beta' ? 'β ' : ''}{o.label ?? `MO ${o.display_number}`}<small>{(o.energy_hartree * 27.211386).toFixed(2)} eV</small></button>)}</div><div className="mo-browser"><strong>다른 MO 불러오기</strong><select aria-label="MO 선택" value={extraOrbitalId} onChange={event => { setExtraOrbitalId(event.target.value); setSelected(event.target.value || undefined) }}><option value="">MO 선택</option>{result.orbitals.map(orbital => <option key={orbital.internal_id} value={orbital.internal_id}>{orbitalOptionLabel(orbital)}</option>)}</select>{extraOrbital && <div className="mo-selection"><span>선택된 MO <b>{extraOrbital.spin === 'alpha' ? 'α ' : extraOrbital.spin === 'beta' ? 'β ' : ''}MO {extraOrbital.display_number}{extraOrbital.label ? ` · ${extraOrbital.label}` : ''}</b></span><span>에너지 <b>{(extraOrbital.energy_hartree * 27.211386245988).toFixed(2)} eV</b></span><span>점유수 <b>{extraOrbital.occupancy.toFixed(1)}</b></span><span>Spin <b>{extraOrbital.spin}</b></span></div>}<button className="wide" disabled={!extraOrbital} onClick={() => addLayer(extraOrbital)}><Plus /> 표면 추가</button></div>{layers.map(layer => <SurfaceControl key={layer.key} layer={layer} />)}</>
 }
 
 export function RightPanel({ capabilities, job }: { capabilities?: Capabilities; job?: any }) {

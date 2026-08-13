@@ -82,15 +82,23 @@ class SurfaceService:
 
     @staticmethod
     def _find_or_generate_cube(job_dir: Path, request: SurfaceRequest) -> Path:
-        patterns = ["*density*.cube", "*.eldens.cube"] if request.field == "total_density" else [f"*{request.orbital_index}*.cube"]
-        for pattern in patterns:
-            if candidate := next(iter(job_dir.glob(pattern)), None):
+        basename = "electronic" if (job_dir / "electronic.gbw").exists() else "optimization"
+        if request.field == "total_density":
+            cube_path = job_dir / f"{basename}.density.cube"
+            density_candidates = [cube_path, *job_dir.glob("*.eldens.cube")]
+            if candidate := next((path for path in density_candidates if path.is_file()), None):
                 return candidate
+        else:
+            cube_path = job_dir / f"{basename}.mo.{request.spin}.{request.orbital_index}.cube"
+            if cube_path.is_file():
+                return cube_path
+            legacy_path = job_dir / f"{basename}.mo.{request.orbital_index}.cube"
+            if request.spin == "restricted" and legacy_path.is_file():
+                return legacy_path
         try:
             from opi.output.core import Output
         except ImportError as exc:
             raise RuntimeError("Cube 생성에 필요한 OPI 2.0을 import할 수 없습니다") from exc
-        basename = "electronic" if (job_dir / "electronic.gbw").exists() else "optimization"
         output = Output(basename, working_dir=job_dir, version_check=False, parse=False)
         # plot_mo/plot_density index into this collection even when parsing is
         # intentionally disabled. Populate it from the existing GBW files first.
@@ -102,9 +110,12 @@ class SurfaceService:
             cube_path = job_dir / f"{basename}.density.cube"
         else:
             cube_output = output.plot_mo(
-                request.orbital_index, resolution=40, gbw_type="gbw", timeout=600
+                request.orbital_index,
+                operator=1 if request.spin == "beta" else 0,
+                resolution=40,
+                gbw_type="gbw",
+                timeout=600,
             )
-            cube_path = job_dir / f"{basename}.mo.{request.orbital_index}.cube"
         cube_text = getattr(cube_output, "cube", None) if cube_output is not None else None
         if not cube_text:
             raise RuntimeError("OPI/orca_plot이 Cube 데이터를 반환하지 않았습니다")

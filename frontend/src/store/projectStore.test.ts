@@ -52,7 +52,7 @@ describe('core smoke flow', () => {
     )).toBeCloseTo(104.5)
     const result = { job_id: 'job', optimized_atoms: useProjectStore.getState().project.atoms, total_energy_hartree: -76, normal_termination: true, scf_converged: true, geometry_converged: true, local_minimum_notice: '입력 구조에서 찾은 국소 최적화 구조', orbitals: [], demo: true }
     useProjectStore.getState().applyResult(result); expect(useProjectStore.getState().viewStructure).toBe('optimized')
-    useProjectStore.getState().upsertSurface({ key: 'density', name: '전체 전자 밀도', field: 'total_density', visible: true, opacity: .5, isovalue: .05, positiveColor: '#fff', negativeColor: '#000', meshUrls: {} })
+    useProjectStore.getState().upsertSurface({ key: 'density', name: '전체 전자 밀도', field: 'total_density', spin: 'restricted', visible: true, opacity: .5, isovalue: .05, positiveColor: '#fff', negativeColor: '#000', meshUrls: {} })
     expect(useProjectStore.getState().surfaces[0].visible).toBe(true)
   })
 })

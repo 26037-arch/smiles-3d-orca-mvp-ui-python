@@ -104,3 +104,48 @@ def test_surface_service_rejects_only_when_both_phases_are_absent(monkeypatch, t
             tmp_path,
             np.array([[[-0.02, -0.01], [0.01, 0.02]]]),
         )
+
+
+def test_mo_cube_generation_is_lazy_cached_and_spin_specific(monkeypatch, tmp_path):
+    (tmp_path / "electronic.gbw").write_bytes(b"gbw")
+    plot_calls: list[tuple[int, int]] = []
+
+    class FakeOutput:
+        def __init__(self, _basename, *, working_dir, **_kwargs):
+            self.working_dir = working_dir
+            self.gbw_json_files = []
+
+        def collect_gbw_json_files(self):
+            self.gbw_json_files = [self.working_dir / "electronic.gbw.json"]
+
+        def plot_mo(self, index, *, operator, **_kwargs):
+            plot_calls.append((index, operator))
+            return SimpleNamespace(cube=f"MO {index}, operator {operator}")
+
+    monkeypatch.setattr("opi.output.core.Output", FakeOutput)
+
+    alpha_request = SurfaceRequest(
+        field="mo", orbital_index=17, spin="alpha", isovalue=0.03
+    )
+    beta_request = SurfaceRequest(
+        field="mo", orbital_index=17, spin="beta", isovalue=0.03
+    )
+    restricted_request = SurfaceRequest(
+        field="mo", orbital_index=17, spin="restricted", isovalue=0.03
+    )
+
+    alpha_path = SurfaceService._find_or_generate_cube(tmp_path, alpha_request)
+    assert SurfaceService._find_or_generate_cube(tmp_path, alpha_request) == alpha_path
+    beta_path = SurfaceService._find_or_generate_cube(tmp_path, beta_request)
+    restricted_path = SurfaceService._find_or_generate_cube(tmp_path, restricted_request)
+
+    assert alpha_path.name == "electronic.mo.alpha.17.cube"
+    assert beta_path.name == "electronic.mo.beta.17.cube"
+    assert restricted_path.name == "electronic.mo.restricted.17.cube"
+    assert len({alpha_path, beta_path, restricted_path}) == 3
+    assert plot_calls == [(17, 0), (17, 1), (17, 0)]
+    assert sorted(path.name for path in tmp_path.glob("*.cube")) == [
+        "electronic.mo.alpha.17.cube",
+        "electronic.mo.beta.17.cube",
+        "electronic.mo.restricted.17.cube",
+    ]

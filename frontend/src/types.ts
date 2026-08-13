@@ -49,13 +49,15 @@ export interface MoleculeProject {
   lastCalculationId?: string
 }
 
+export type OrbitalSpin = 'restricted' | 'alpha' | 'beta'
+
 export interface Orbital {
   internal_id: string
   orca_index: number
   display_number: number
   energy_hartree: number
   occupancy: number
-  spin: 'restricted' | 'alpha' | 'beta'
+  spin: OrbitalSpin
   label?: string
 }
 
@@ -78,6 +80,7 @@ export interface SurfaceLayer {
   name: string
   field: 'total_density' | 'mo'
   orbitalIndex?: number
+  spin: OrbitalSpin
   visible: boolean
   opacity: number
   isovalue: number
@@ -97,4 +100,3 @@ export interface Capabilities {
   orcaPlot: { available: boolean; path?: string }
   jobs: { writable: boolean; path: string }
 }
-
