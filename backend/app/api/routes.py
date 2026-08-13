@@ -15,7 +15,8 @@ from ..chemistry.opi_adapter import ChemistryError
 from ..chemistry.presets import PRESETS
 from ..config import configure_orca_environment, load_settings, save_orca_path
 from ..jobs.manager import JobManager
-from ..models import JobCreate, MoleculeProject, SurfaceRequest
+from ..models import JobCreate, MoleculeProject, PlotSampleRequest, SurfaceRequest
+from ..plots import PlotSamplingService
 from ..surfaces.mesh import MESH_CACHE_VERSION
 from ..surfaces.service import SurfaceService
 from ..validation import validate_project
@@ -30,6 +31,10 @@ def manager(request: Request) -> JobManager:
 
 def surfaces(request: Request) -> SurfaceService:
     return request.app.state.surfaces
+
+
+def plots(request: Request) -> PlotSamplingService:
+    return request.app.state.plots
 
 
 def error(status: int, code: str, detail: str) -> HTTPException:
@@ -163,6 +168,18 @@ def create_surface(job_id: UUID, body: SurfaceRequest, request: Request):
         raise error(404, "SURFACE_SOURCE_NOT_FOUND", str(exc)) from exc
     except (IndexError, UnicodeDecodeError, ValueError, RuntimeError) as exc:
         raise error(422, "SURFACE_GENERATION_FAILED", str(exc)) from exc
+    except ChemistryError as exc:
+        raise error(409, exc.code, exc.detail) from exc
+
+
+@router.post("/jobs/{job_id}/plots/sample")
+def sample_plot(job_id: UUID, body: PlotSampleRequest, request: Request):
+    try:
+        return plots(request).sample(job_id, body)
+    except FileNotFoundError as exc:
+        raise error(404, "PLOT_RESULT_NOT_READY", str(exc)) from exc
+    except (IndexError, UnicodeDecodeError, ValueError, RuntimeError) as exc:
+        raise error(422, "PLOT_SAMPLING_FAILED", str(exc)) from exc
     except ChemistryError as exc:
         raise error(409, exc.code, exc.detail) from exc
 

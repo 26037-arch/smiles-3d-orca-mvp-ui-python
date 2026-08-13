@@ -214,3 +214,62 @@ class SurfaceRecord(StrictModel):
     phases: list[str]
     cache_hit: bool
     mesh_urls: dict[str, str]
+
+
+class PlotField(StrictModel):
+    field: Literal["mo", "total_density"]
+    orbital_internal_id: str | None = None
+    orbital_index: int | None = None
+    spin: Literal["restricted", "alpha", "beta"] = "restricted"
+
+    @model_validator(mode="after")
+    def field_metadata(self) -> "PlotField":
+        if self.field == "mo" and (
+            self.orbital_internal_id is None or self.orbital_index is None
+        ):
+            raise ValueError("MO 그래프에는 orbital_internal_id와 orbital_index가 필요합니다")
+        if self.field == "total_density" and (
+            self.orbital_internal_id is not None or self.orbital_index is not None
+        ):
+            raise ValueError("전체 전자밀도에는 오비탈 정보를 지정할 수 없습니다")
+        return self
+
+
+class AxisLineCut(StrictModel):
+    kind: Literal["axis_line"]
+    axis: Literal["x", "y", "z"]
+    offsets: tuple[float, float] = (0.0, 0.0)
+
+
+class AtomLineCut(StrictModel):
+    kind: Literal["atom_line"]
+    atom_ids: tuple[UUID, UUID]
+
+
+class AxisPlaneCut(StrictModel):
+    kind: Literal["axis_plane"]
+    plane: Literal["xy", "yz", "zx"]
+    offset: float = 0.0
+
+
+class AtomPlaneCut(StrictModel):
+    kind: Literal["atom_plane"]
+    atom_ids: tuple[UUID, UUID, UUID]
+
+
+class PlotBounds(StrictModel):
+    automatic: bool = True
+    padding: Annotated[float, Field(ge=0, le=20)] = 2.0
+    s: tuple[float, float] | None = None
+    u: tuple[float, float] | None = None
+    v: tuple[float, float] | None = None
+
+
+class PlotSampleRequest(StrictModel):
+    field: PlotField
+    cut: AxisLineCut | AtomLineCut | AxisPlaneCut | AtomPlaneCut
+    bounds: PlotBounds = Field(default_factory=PlotBounds)
+    line_samples: Annotated[int, Field(ge=32, le=4096)] = 512
+    plane_samples_u: Annotated[int, Field(ge=16, le=256)] = 96
+    plane_samples_v: Annotated[int, Field(ge=16, le=256)] = 96
+    cube_resolution: Annotated[int, Field(ge=20, le=100)] = 40

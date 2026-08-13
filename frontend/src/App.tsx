@@ -8,6 +8,8 @@ import { RightPanel } from './components/RightPanel'
 import { ToolRail } from './components/ToolRail'
 import { TopBar } from './components/TopBar'
 import { Viewport } from './components/Viewport'
+import { PlotWorkspace } from './components/plots/PlotWorkspace'
+import { useAnalysisStore } from './store/analysisStore'
 import { useProjectStore } from './store/projectStore'
 import type { Capabilities } from './types'
 import { parseProjectJson, projectToJson } from './chem/serialization'
@@ -19,6 +21,7 @@ export default function App() {
   const [bottomPanelHeight, setBottomPanelHeight] = useState(DEFAULT_BOTTOM_PANEL_HEIGHT)
   const error = useProjectStore(s => s.error); const notice = useProjectStore(s => s.notice)
   const setError = useProjectStore(s => s.setError); const setNotice = useProjectStore(s => s.setNotice)
+  const analysisMode = useAnalysisStore(s => s.mode)
 
   useEffect(() => { api.capabilities().then(setCapabilities).catch(e => setError(`백엔드 연결 실패: ${e.message}`)) }, [setError])
 
@@ -53,6 +56,10 @@ export default function App() {
     window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey)
   }, [])
 
+  useEffect(() => {
+    useAnalysisStore.getState().reset()
+  }, [job?.id])
+
   const run = async (mode: 'orca' | 'demo') => {
     try {
       setError(); setLog(''); const created = await api.createJob(useProjectStore.getState().project, mode); setJob(created); localStorage.setItem('geoorca.lastJobId', created.id)
@@ -70,7 +77,7 @@ export default function App() {
   return <main className="app-shell" style={{ '--bottom': `${bottomPanelHeight}px` } as CSSProperties}>
     <TopBar capabilities={capabilities} job={job} onRun={run} onCancel={cancel} />
     <ToolRail />
-    <section className="viewport-shell"><Viewport /></section>
+    <section className={`viewport-shell ${analysisMode === 'plot' ? 'plot-open' : ''}`}>{analysisMode === 'plot' ? <PlotWorkspace /> : <Viewport />}</section>
     <RightPanel capabilities={capabilities} job={job} />
     <BottomPanel job={job} log={log} height={bottomPanelHeight} onHeightChange={setBottomPanelHeight} />
     {(error || notice) && <div className={`toast ${error ? 'error' : 'notice'}`} role="alert">

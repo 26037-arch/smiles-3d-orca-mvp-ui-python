@@ -1,4 +1,4 @@
-import type { CalculationResult, Capabilities, MoleculeProject } from '../types'
+import type { CalculationResult, Capabilities, MoleculeProject, PlotSample, PlotSampleRequest } from '../types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, { ...init, cache: 'no-store', headers: { 'Content-Type': 'application/json', ...init?.headers } })
@@ -23,4 +23,5 @@ export const api = {
   result: (id: string) => request<CalculationResult>(`/api/jobs/${id}/result`),
   cancel: (id: string) => request<any>(`/api/jobs/${id}/cancel`, { method: 'POST' }),
   surface: (id: string, body: any) => request<any>(`/api/jobs/${id}/surfaces`, { method: 'POST', body: JSON.stringify(body) }),
+  samplePlot: (id: string, body: PlotSampleRequest) => request<PlotSample>(`/api/jobs/${id}/plots/sample`, { method: 'POST', body: JSON.stringify(body) }),
 }

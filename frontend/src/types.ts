@@ -100,3 +100,56 @@ export interface Capabilities {
   orcaPlot: { available: boolean; path?: string }
   jobs: { writable: boolean; path: string }
 }
+
+export type PlotFieldMode = 'mo' | 'total_density'
+export type PlotCut =
+  | { kind: 'axis_line'; axis: 'x' | 'y' | 'z'; offsets: [number, number] }
+  | { kind: 'atom_line'; atom_ids: [string, string] }
+  | { kind: 'axis_plane'; plane: 'xy' | 'yz' | 'zx'; offset: number }
+  | { kind: 'atom_plane'; atom_ids: [string, string, string] }
+
+export interface PlotSampleRequest {
+  field: {
+    field: PlotFieldMode
+    orbital_internal_id?: string
+    orbital_index?: number
+    spin?: OrbitalSpin
+  }
+  cut: PlotCut
+  bounds: { automatic: boolean; padding: number }
+  line_samples?: number
+  plane_samples_u?: number
+  plane_samples_v?: number
+  cube_resolution?: number
+}
+
+export interface LinePlotSample {
+  kind: 'line'
+  field: PlotSampleRequest['field']
+  coordinate_label: string
+  coordinates: number[]
+  values: Array<number | null>
+  valid: boolean[]
+  origin: Vec3
+  direction: Vec3
+  bounds: { s: [number, number] }
+  cache_hit: boolean
+}
+
+export interface PlanePlotSample {
+  kind: 'plane'
+  field: PlotSampleRequest['field']
+  u_label: string
+  v_label: string
+  u: number[]
+  v: number[]
+  values: Array<Array<number | null>>
+  valid: boolean[][]
+  origin: Vec3
+  basis_u: Vec3
+  basis_v: Vec3
+  bounds: { u: [number, number]; v: [number, number] }
+  cache_hit: boolean
+}
+
+export type PlotSample = LinePlotSample | PlanePlotSample

@@ -4,15 +4,17 @@ import hashlib
 from pathlib import Path
 from uuid import UUID
 
+from ..fields import CubeFieldService
 from ..jobs.manager import JobManager
-from ..models import JobMode, SurfaceRecord, SurfaceRequest
+from ..models import JobMode, PlotField, SurfaceRecord, SurfaceRequest
 from .cube import read_cube
 from .mesh import cache_key, contour_to_ply, demo_surface_ply
 
 
 class SurfaceService:
-    def __init__(self, jobs: JobManager):
+    def __init__(self, jobs: JobManager, fields: CubeFieldService | None = None):
         self.jobs = jobs
+        self.fields = fields
 
     def create(self, job_id: UUID, request: SurfaceRequest) -> SurfaceRecord:
         record = self.jobs.get(job_id)
@@ -29,9 +31,26 @@ class SurfaceService:
             cube_hash = "demo-v1"
             phases = requested_phases
         else:
-            cube_path = self._find_or_generate_cube(job_dir, request)
-            cube_hash = hashlib.sha256(cube_path.read_bytes()).hexdigest()
-            cube = read_cube(cube_path)
+            if self.fields is None:
+                cube_path = self._find_or_generate_cube(job_dir, request)
+                cube_hash = hashlib.sha256(cube_path.read_bytes()).hexdigest()
+                cube = read_cube(cube_path)
+            else:
+                field = PlotField(
+                    field=request.field,
+                    orbital_internal_id=(
+                        f"{request.spin}:{request.orbital_index}"
+                        if request.field == "mo"
+                        else None
+                    ),
+                    orbital_index=request.orbital_index,
+                    spin=request.spin,
+                )
+                cube, _ = self.fields.load(job_dir, field, resolution=40)
+                digest = hashlib.sha256()
+                for value in (cube.origin, cube.axes, cube.values):
+                    digest.update(value.tobytes())
+                cube_hash = digest.hexdigest()
             phases = [
                 phase
                 for phase in requested_phases

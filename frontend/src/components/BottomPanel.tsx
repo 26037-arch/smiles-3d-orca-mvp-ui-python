@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Activity, ChevronDown, RotateCcw, TerminalSquare, ZoomIn, ZoomOut } from 'lucide-react'
+import { useAnalysisStore } from '../store/analysisStore'
 import { useProjectStore } from '../store/projectStore'
 import {
   DEFAULT_ENERGY_BREAK_THRESHOLD_EV,
@@ -34,6 +35,11 @@ export function BottomPanel({
   const result = useProjectStore(state => state.result)
   const selected = useProjectStore(state => state.selectedOrbital)
   const setSelected = useProjectStore(state => state.setSelectedOrbital)
+  const setError = useProjectStore(state => state.setError)
+  const analysisMode = useAnalysisStore(state => state.mode)
+  const graphMoIds = useAnalysisStore(state => state.selectedMoIds)
+  const addGraphMo = useAnalysisStore(state => state.addMo)
+  const setGraphFieldMode = useAnalysisStore(state => state.setFieldMode)
   const orbitals = useMemo(() => result?.orbitals ?? [], [result?.orbitals])
   const expandedBreakKeySet = useMemo(() => new Set(expandedBreakKeys), [expandedBreakKeys])
   const layout = useMemo(() => layoutEnergyLevels(orbitals, zoom, {
@@ -102,6 +108,13 @@ export function BottomPanel({
     setExpandedBreakKeys(keys => expanded
       ? [...new Set([...keys, key])]
       : keys.filter(existing => existing !== key))
+  }
+
+  const selectEnergyOrbital = (orbitalId: string) => {
+    setSelected(orbitalId)
+    if (analysisMode !== 'plot') return
+    setGraphFieldMode('mo')
+    if (!addGraphMo(orbitalId)) setError('MO 그래프는 최대 5개입니다')
   }
 
   return (
@@ -194,9 +207,9 @@ export function BottomPanel({
                     return (
                       <button
                         key={orbital.internal_id}
-                        className={`level ${orbital.occupancy ? 'occupied' : 'virtual'} ${selected === orbital.internal_id ? 'selected' : ''}`}
+                        className={`level ${orbital.occupancy ? 'occupied' : 'virtual'} ${selected === orbital.internal_id ? 'selected' : ''} ${analysisMode === 'plot' && graphMoIds.includes(orbital.internal_id) ? 'graph-selected' : ''}`}
                         style={{ top, left: `${left}%`, width: `${width}%` }}
-                        onClick={() => setSelected(orbital.internal_id)}
+                        onClick={() => selectEnergyOrbital(orbital.internal_id)}
                         title={`ORCA index ${orbital.orca_index}; 표시 번호 ${orbital.display_number}`}
                       >
                         <i />

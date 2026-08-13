@@ -9,6 +9,8 @@ from .api.routes import router
 from .chemistry.encoding import install_opi_utf8_compatibility
 from .config import configure_orca_environment, load_settings
 from .jobs.manager import JobManager
+from .fields import CubeFieldService
+from .plots import PlotSamplingService
 from .surfaces.service import SurfaceService
 
 
@@ -19,7 +21,9 @@ async def lifespan(app: FastAPI):
     install_opi_utf8_compatibility()
     configure_orca_environment(settings.orca_path)
     app.state.jobs = JobManager(settings)
-    app.state.surfaces = SurfaceService(app.state.jobs)
+    app.state.fields = CubeFieldService()
+    app.state.surfaces = SurfaceService(app.state.jobs, app.state.fields)
+    app.state.plots = PlotSamplingService(app.state.jobs, app.state.fields)
     yield
     app.state.jobs.executor.shutdown(wait=False, cancel_futures=True)
 

@@ -106,6 +106,33 @@ def test_surface_service_rejects_only_when_both_phases_are_absent(monkeypatch, t
         )
 
 
+def test_surface_service_uses_shared_cube_field_cache(monkeypatch, tmp_path):
+    calls = []
+
+    class SharedFields:
+        def load(self, job_dir, field, *, resolution):
+            calls.append((job_dir, field.field, field.orbital_index, resolution))
+            return make_cube(np.array([[[-0.04, 0.04], [0.0, 0.0]]])), True
+
+    monkeypatch.setattr(
+        SurfaceService,
+        "_find_or_generate_cube",
+        staticmethod(lambda *_args: pytest.fail("legacy Cube generator should not be used")),
+    )
+    monkeypatch.setattr(
+        "backend.app.surfaces.service.contour_to_ply",
+        lambda _cube, _level, output: output.write_bytes(b"ply"),
+    )
+
+    record = SurfaceService(FakeJobs(tmp_path), SharedFields()).create(
+        uuid4(),
+        SurfaceRequest(field="mo", orbital_index=7, spin="beta", isovalue=0.03),
+    )
+
+    assert calls == [(tmp_path, "mo", 7, 40)]
+    assert record.phases == ["positive", "negative"]
+
+
 def test_mo_cube_generation_is_lazy_cached_and_spin_specific(monkeypatch, tmp_path):
     (tmp_path / "electronic.gbw").write_bytes(b"gbw")
     plot_calls: list[tuple[int, int]] = []
