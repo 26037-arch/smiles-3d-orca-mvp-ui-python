@@ -2,15 +2,26 @@ from __future__ import annotations
 
 import json
 import hashlib
+import threading
 from copy import deepcopy
 from pathlib import Path, PurePath
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from pydantic import ValidationError
 
-from ..models import OrbitalMatch, ReactionPathPlayback, ReactionPathResult
+from ..cache import BoundedLRU, DerivedCacheManager
+from ..fields import CubeFieldService
+from ..models import (
+    OrbitalMatch,
+    PlotField,
+    ReactionPathPlayback,
+    ReactionPathResult,
+    SurfaceRequest,
+)
 from ..surfaces.cube import read_cube
 from ..surfaces.mesh import contour_to_ply
+from ..wavefunction import WavefunctionContext, reaction_wavefunction_context
 from .geometry import create_display_frames, image_coordinates, mass_weighted_kabsch_transform
 from .errors import ReactionPathError
 from .importer import ReactionPathManifestGenerator
@@ -21,6 +32,9 @@ from .orbitals import (
     transformed_common_grid,
     trilinear_resample_transformed,
 )
+
+if TYPE_CHECKING:
+    from ..surfaces.service import SurfaceService
 
 
 HARTREE_TO_KJ_MOL = 2625.499638
@@ -42,12 +56,33 @@ def _contained_reference(job_dir: Path, reference: str, *, require_exists: bool 
 
 
 class ReactionPathService:
-    def __init__(self, jobs):
+    TRACKING_VERSION = "signed-overlap-v2"
+
+    def __init__(
+        self,
+        jobs,
+        fields: CubeFieldService | None = None,
+        surfaces: SurfaceService | None = None,
+        cache: DerivedCacheManager | None = None,
+    ):
         self.jobs = jobs
+        self.fields = fields
+        self.surfaces = surfaces
+        self.cache = cache or getattr(jobs, "derived_cache", None)
         self.generator = ReactionPathManifestGenerator()
         self._cache: dict[tuple[UUID, int], ReactionPathPlayback] = {}
-        self._cube_cache: dict[tuple[Path, int], object] = {}
-        self._overlap_cache: dict[tuple[Path, int, Path, int], float] = {}
+        settings = getattr(jobs, "settings", None)
+        self._cube_cache = BoundedLRU(
+            64,
+            max_bytes=getattr(settings, "max_ram_cube_cache_bytes", 256_000_000),
+            size_of=lambda cube: int(
+                cube.values.nbytes + cube.origin.nbytes + cube.axes.nbytes
+            ),
+        )
+        self._overlap_cache = BoundedLRU(
+            getattr(settings, "max_ram_overlap_entries", 512)
+        )
+        self._tracking_lock = threading.RLock()
 
     def load(self, job_id: UUID) -> ReactionPathPlayback:
         job_dir = self.jobs._job_dir(job_id)
@@ -64,65 +99,172 @@ class ReactionPathService:
         self._cache[key] = playback
         return playback
 
-    def track_orbital(self, job_id: UUID, orbital_id: str, isovalue: float = 0.03) -> dict[str, object]:
+    def track_orbital(
+        self, job_id: UUID, orbital_id: str, source_geometry_index: int = 0
+    ) -> dict[str, object]:
+        # Tracking is metadata-only. Frame meshes are requested separately and
+        # generated lazily by tracking_frame_surface().
+        return self._track_metadata(job_id, orbital_id, source_geometry_index)
+
+    def wavefunction_context(
+        self, job_id: UUID, geometry_index: int
+    ) -> WavefunctionContext:
+        job_dir = self.jobs._job_dir(job_id)
+        return reaction_wavefunction_context(job_dir, self.load(job_id), geometry_index)
+
+    def create_geometry_surface(
+        self, job_id: UUID, geometry_index: int, request: SurfaceRequest
+    ):
+        if self.surfaces is None:
+            raise RuntimeError("surface service is unavailable")
+        return self.surfaces.create_for_context(
+            job_id, request, self.wavefunction_context(job_id, geometry_index)
+        )
+
+    def _track_metadata(
+        self, job_id: UUID, orbital_id: str, source_geometry_index: int
+    ) -> dict[str, object]:
         playback = self.load(job_id)
         job_dir = self.jobs._job_dir(job_id)
         try:
             spin, index_text = orbital_id.rsplit(":", 1)
             int(index_text)
         except (ValueError, TypeError) as exc:
-            raise ReactionPathError("INVALID_ORBITAL_ID", f"오비탈 ID 형식이 잘못되었습니다: {orbital_id}") from exc
-        tracker = OrbitalTracker(orbital_id)
+            raise ReactionPathError("INVALID_ORBITAL_ID", orbital_id) from exc
+        if source_geometry_index < 0 or source_geometry_index >= len(playback.path.images):
+            raise ReactionPathError(
+                "GEOMETRY_INDEX_OUT_OF_RANGE", str(source_geometry_index)
+            )
+        source_image = playback.path.images[source_geometry_index]
+        if source_image.convergence == "unconverged":
+            raise ReactionPathError(
+                "SCF_UNCONVERGED", "source geometry SCF is unconverged"
+            )
+        available = {item.internal_id for item in source_image.orbitals} | set(
+            source_image.orbital_refs
+        )
+        if available and orbital_id not in available:
+            raise ReactionPathError("INVALID_ORBITAL_ID", orbital_id)
+
+        signature = [self.TRACKING_VERSION, str(source_geometry_index), orbital_id]
+        for image in playback.path.images:
+            if image.wavefunction_ref:
+                path = job_dir / image.wavefunction_ref
+                signature.append(
+                    f"{image.index}:{path.stat().st_mtime_ns if path.is_file() else 0}"
+                )
+        tracking_id = hashlib.sha256(":".join(signature).encode()).hexdigest()[:32]
+        directory = self._tracking_directory(job_dir)
+        metadata_path = directory / f"{tracking_id}.json"
+        with self._tracking_lock:
+            if metadata_path.is_file():
+                payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+                payload["cacheHit"] = True
+                if self.cache is not None:
+                    self.cache.record(metadata_path)
+                return payload
+
+            source_path = self._ensure_context_orbital_cube(
+                job_dir, playback, source_geometry_index, orbital_id
+            )
+            tracked: dict[int, tuple[str, Path, int]] = {
+                source_geometry_index: (orbital_id, source_path, 1)
+            }
+            transitions: list[dict[str, object]] = []
+            for direction in (-1, 1):
+                branch, branch_transitions = self._track_branch(
+                    job_dir,
+                    playback,
+                    source_geometry_index,
+                    orbital_id,
+                    spin,
+                    direction,
+                )
+                tracked.update(branch)
+                transitions.extend(branch_transitions)
+            payload: dict[str, object] = {
+                "trackingId": tracking_id,
+                "sourceOrbital": orbital_id,
+                "sourceGeometryIndex": source_geometry_index,
+                "threshold": 0.6,
+                "active": len(tracked) == len(playback.path.images),
+                "steps": [
+                    {"geometry": index, "orbital": item[0], "phase": item[2]}
+                    for index, item in sorted(tracked.items())
+                ],
+                "transitions": sorted(
+                    transitions,
+                    key=lambda item: (
+                        min(item["leftImageIndex"], item["rightImageIndex"]),
+                        item["leftImageIndex"],
+                    ),
+                ),
+                "cacheHit": False,
+            }
+            temporary = metadata_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            temporary.replace(metadata_path)
+            if self.cache is not None:
+                self.cache.record(metadata_path)
+            return payload
+
+    def _track_branch(
+        self,
+        job_dir: Path,
+        playback: ReactionPathPlayback,
+        source_index: int,
+        source_orbital: str,
+        spin: str,
+        direction: int,
+    ) -> tuple[dict[int, tuple[str, Path, int]], list[dict[str, object]]]:
+        tracked: dict[int, tuple[str, Path, int]] = {}
+        transitions: list[dict[str, object]] = []
+        current_index = source_index
+        current_orbital = source_orbital
+        current_path = self._ensure_context_orbital_cube(
+            job_dir, playback, current_index, current_orbital
+        )
         phase_sign = 1
-        steps: list[dict[str, object]] = []
-        tracked: list[tuple[str, Path, int]] = []
-        first_path = self._ensure_orbital_cube(job_dir, playback.path.images[0], orbital_id)
-        if playback.path.images[0].convergence == "unconverged":
-            raise ReactionPathError("SCF_UNCONVERGED", "계산 지점 1의 SCF가 수렴하지 않아 MO를 추적할 수 없습니다")
-        tracked.append((orbital_id, first_path, phase_sign))
-        for image_index in range(len(playback.path.images) - 1):
-            left_image = playback.path.images[image_index]
-            right_image = playback.path.images[image_index + 1]
-            left_path = self._ensure_orbital_cube(
-                job_dir, left_image, tracker.current_orbital_id
-            )
+        while 0 <= current_index + direction < len(playback.path.images):
+            next_index = current_index + direction
+            current_image = playback.path.images[current_index]
+            next_image = playback.path.images[next_index]
             candidates: list[tuple[str, Path]] = []
-            if right_image.convergence == "unconverged":
-                match = tracker.advance(tracker.current_orbital_id, 0.0)
-                steps.append({
-                    "leftImageIndex": image_index, "rightImageIndex": image_index + 1,
-                    "match": match.model_dump(mode="json", by_alias=True), "phaseSign": phase_sign,
-                })
-                break
-            current_index = int(tracker.current_orbital_id.rsplit(":", 1)[1])
-            candidate_ids = (
-                [orbital.internal_id for orbital in right_image.orbitals]
-                if right_image.orbitals
-                else list(right_image.orbital_refs)
-            )
-            for candidate_id in candidate_ids:
-                try:
-                    candidate_spin, candidate_index = candidate_id.rsplit(":", 1)
-                    if candidate_spin == spin and abs(int(candidate_index) - current_index) <= 5:
-                        candidates.append((
-                            candidate_id,
-                            self._ensure_orbital_cube(job_dir, right_image, candidate_id),
-                        ))
-                except ValueError:
-                    continue
-                except ReactionPathError:
-                    continue
-            if not candidates:
-                match = tracker.advance(tracker.current_orbital_id, 0.0)
-            else:
+            if next_image.convergence != "unconverged":
+                current_number = int(current_orbital.rsplit(":", 1)[1])
+                candidate_ids = (
+                    [item.internal_id for item in next_image.orbitals]
+                    if next_image.orbitals
+                    else list(next_image.orbital_refs)
+                )
+                for candidate_id in candidate_ids:
+                    try:
+                        candidate_spin, candidate_number = candidate_id.rsplit(":", 1)
+                        if (
+                            candidate_spin == spin
+                            and abs(int(candidate_number) - current_number) <= 5
+                        ):
+                            candidates.append(
+                                (
+                                    candidate_id,
+                                    self._ensure_context_orbital_cube(
+                                        job_dir, playback, next_index, candidate_id
+                                    ),
+                                )
+                            )
+                    except (ValueError, ReactionPathError):
+                        continue
+            tracker = OrbitalTracker(current_orbital)
+            signed = 0.0
+            if candidates:
                 overlaps = [
                     (
                         candidate_id,
                         self._signed_overlap(
-                            left_path,
+                            current_path,
                             candidate_path,
-                            left_image,
-                            right_image,
+                            current_image,
+                            next_image,
                             playback.path.elements,
                         ),
                     )
@@ -143,86 +285,169 @@ class ReactionPathService:
                         absoluteOverlap=match.absolute_overlap,
                         status="ambiguous",
                     )
-                if match.status == "matched" and signed < 0:
-                    phase_sign *= -1
-                elif match.status == "ambiguous" and signed < 0:
-                    phase_sign *= -1
-            steps.append({
-                "leftImageIndex": image_index,
-                "rightImageIndex": image_index + 1,
-                "match": match.model_dump(mode="json", by_alias=True),
-                "phaseSign": phase_sign,
-            })
-            if not tracker.active:
+            else:
+                match = tracker.advance(current_orbital, 0.0)
+            if match.status in {"matched", "ambiguous"} and signed < 0:
+                phase_sign *= -1
+            transitions.append(
+                {
+                    "leftImageIndex": current_index,
+                    "rightImageIndex": next_index,
+                    "match": match.model_dump(mode="json", by_alias=True),
+                    "phaseSign": phase_sign,
+                }
+            )
+            if match.right_orbital_id is None:
                 break
-            assert match.right_orbital_id is not None
-            tracked.append((
-                match.right_orbital_id,
-                self._ensure_orbital_cube(job_dir, right_image, match.right_orbital_id),
-                phase_sign,
-            ))
-        frame_surfaces = self._prepare_orbital_frames(job_dir, playback, tracked, orbital_id, isovalue)
-        return {
-            "orbitalId": orbital_id, "threshold": tracker.threshold, "active": tracker.active,
-            "steps": steps, "frameSurfaces": frame_surfaces,
-        }
+            current_orbital = match.right_orbital_id
+            current_path = next(
+                path for candidate, path in candidates if candidate == current_orbital
+            )
+            tracked[next_index] = (current_orbital, current_path, phase_sign)
+            current_index = next_index
+        return tracked, transitions
 
-    def _prepare_orbital_frames(
-        self, job_dir: Path, playback: ReactionPathPlayback,
-        tracked: list[tuple[str, Path, int]], orbital_id: str, isovalue: float,
-    ) -> dict[str, dict[str, str]]:
-        if not tracked:
-            return {}
-        cubes = [self._load_cube(path) for _, path, _ in tracked]
+    def tracking_frame_surface(
+        self,
+        job_id: UUID,
+        tracking_id: str,
+        frame_index: int,
+        isovalue: float = 0.03,
+    ) -> dict[str, object]:
+        playback = self.load(job_id)
+        if frame_index < 0 or frame_index >= len(playback.display_frames):
+            raise ReactionPathError("FRAME_INDEX_OUT_OF_RANGE", str(frame_index))
+        job_dir = self.jobs._job_dir(job_id)
+        metadata = self._tracking_metadata(job_dir, tracking_id)
+        tracked = {item["geometry"]: item for item in metadata["steps"]}
+        frame = playback.display_frames[frame_index]
+        if (
+            frame.left_image_index not in tracked
+            or frame.right_image_index not in tracked
+        ):
+            raise ReactionPathError(
+                "TRACKING_NOT_AVAILABLE_FOR_FRAME", str(frame_index)
+            )
+        left_info = tracked[frame.left_image_index]
+        right_info = tracked[frame.right_image_index]
+        left_path = self._ensure_context_orbital_cube(
+            job_dir, playback, frame.left_image_index, left_info["orbital"]
+        )
+        right_path = self._ensure_context_orbital_cube(
+            job_dir, playback, frame.right_image_index, right_info["orbital"]
+        )
+        cubes = [self._load_cube(left_path), self._load_cube(right_path)]
         reference = image_coordinates(playback.path.images[0])
         transforms = [
             mass_weighted_kabsch_transform(
-                reference, image_coordinates(playback.path.images[index]), playback.path.elements
+                reference,
+                image_coordinates(playback.path.images[index]),
+                playback.path.elements,
             )
-            for index in range(len(tracked))
+            for index in (frame.left_image_index, frame.right_image_index)
         ]
         grid = transformed_common_grid(cubes, transforms)
-        fields = [
-            trilinear_resample_transformed(cube, grid, transform) * sign
-            for cube, transform, (_, _, sign) in zip(cubes, transforms, tracked, strict=True)
+        left = trilinear_resample_transformed(cubes[0], grid, transforms[0]) * left_info[
+            "phase"
         ]
+        right = trilinear_resample_transformed(cubes[1], grid, transforms[1]) * right_info[
+            "phase"
+        ]
+        values = interpolate_scalar_fields(left, right, frame.interpolation_value)
+        frame_cube = grid.__class__(grid.origin, grid.axes, grid.shape, values)
+        directory = self._tracking_directory(job_dir)
+        urls: dict[str, str] = {}
+        outputs: list[Path] = []
+        all_hit = True
+        for phase, level in (("positive", isovalue), ("negative", -isovalue)):
+            if phase == "positive" and float(values.max()) < level:
+                continue
+            if phase == "negative" and float(values.min()) > level:
+                continue
+            key = hashlib.sha256(
+                f"{tracking_id}:{frame_index}:{isovalue:.9g}:{phase}".encode()
+            ).hexdigest()[:32]
+            output = directory / f"{key}.ply"
+            outputs.append(output)
+            if not output.is_file():
+                all_hit = False
+                contour_to_ply(frame_cube, level, output)
+            urls[phase] = (
+                f"/api/jobs/{job_id}/reaction-path/surfaces/{key}/mesh"
+            )
+        if not urls:
+            raise ReactionPathError("EMPTY_TRACKING_SURFACE", str(isovalue))
+        if self.cache is not None:
+            for output in outputs:
+                self.cache.record(output, protected=outputs)
+        return {"frameIndex": frame_index, "meshUrls": urls, "cacheHit": all_hit}
+
+    def _tracking_metadata(self, job_dir: Path, tracking_id: str) -> dict[str, object]:
+        if len(tracking_id) != 32 or any(
+            character not in "0123456789abcdef" for character in tracking_id
+        ):
+            raise ReactionPathError("INVALID_TRACKING_ID", tracking_id)
+        path = self._tracking_directory(job_dir) / f"{tracking_id}.json"
+        if not path.is_file():
+            raise ReactionPathError("TRACKING_NOT_FOUND", tracking_id)
+        if self.cache is not None:
+            self.cache.record(path)
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def _tracking_directory(self, job_dir: Path) -> Path:
+        if self.cache is not None:
+            return self.cache.directory(job_dir, "tracking")
         directory = job_dir / "reaction-surfaces"
         directory.mkdir(exist_ok=True)
-        result: dict[str, dict[str, str]] = {}
-        maximum_image = len(tracked) - 1
-        digest_seed = ":".join(
-            [orbital_id, f"{isovalue:.9g}", *[f"{path}:{path.stat().st_mtime_ns}:{sign}" for _, path, sign in tracked]]
-        )
-        for frame in playback.display_frames:
-            if frame.left_image_index > maximum_image or frame.right_image_index > maximum_image:
-                continue
-            left = fields[frame.left_image_index]
-            right = fields[frame.right_image_index]
-            values = interpolate_scalar_fields(left, right, frame.interpolation_value)
-            frame_cube = grid.__class__(grid.origin, grid.axes, grid.shape, values)
-            urls: dict[str, str] = {}
-            for phase, level in (("positive", isovalue), ("negative", -isovalue)):
-                if phase == "positive" and float(values.max()) < level:
-                    continue
-                if phase == "negative" and float(values.min()) > level:
-                    continue
-                key = hashlib.sha256(f"{digest_seed}:{frame.index}:{phase}".encode()).hexdigest()[:32]
-                output = directory / f"{key}.ply"
-                if not output.is_file():
-                    contour_to_ply(frame_cube, level, output)
-                urls[phase] = f"/api/jobs/{job_dir.name}/reaction-path/surfaces/{key}/mesh"
-            if urls:
-                result[str(frame.index)] = urls
-        return result
+        return directory
+
+    def _ensure_context_orbital_cube(
+        self,
+        job_dir: Path,
+        playback: ReactionPathPlayback,
+        geometry_index: int,
+        orbital_id: str,
+    ) -> Path:
+        image = playback.path.images[geometry_index]
+        if self.fields is None:
+            return self._ensure_orbital_cube(job_dir, image, orbital_id)
+        context = reaction_wavefunction_context(job_dir, playback, geometry_index)
+        try:
+            spin, index_text = orbital_id.rsplit(":", 1)
+            orbital_index = int(index_text)
+        except ValueError as exc:
+            raise ReactionPathError("INVALID_ORBITAL_ID", orbital_id) from exc
+        try:
+            path, _ = self.fields.ensure_context(
+                job_dir,
+                context,
+                PlotField(
+                    field="mo",
+                    orbital_internal_id=orbital_id,
+                    orbital_index=orbital_index,
+                    spin=spin,
+                ),
+                resolution=40,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ReactionPathError(
+                "ORBITAL_TRACKING_FAILED",
+                f"geometry step {geometry_index} {orbital_id} Cube generation failed: {exc}",
+            ) from exc
+        return path
 
     def mesh_path(self, job_id: UUID, surface_id: str) -> Path:
         if len(surface_id) != 32 or any(character not in "0123456789abcdef" for character in surface_id):
             raise FileNotFoundError(surface_id)
-        directory = (self.jobs._job_dir(job_id) / "reaction-surfaces").resolve()
-        path = (directory / f"{surface_id}.ply").resolve()
-        if path.parent != directory or not path.is_file():
-            raise FileNotFoundError(surface_id)
-        return path
+        job_dir = self.jobs._job_dir(job_id)
+        for directory in (job_dir / "cache" / "tracking", job_dir / "reaction-surfaces"):
+            expected = directory.resolve()
+            path = (directory / f"{surface_id}.ply").resolve()
+            if path.parent == expected and path.is_file():
+                if self.cache is not None and directory.name == "tracking":
+                    self.cache.record(path)
+                return path
+        raise FileNotFoundError(surface_id)
 
     def _load_cube(self, path: Path):
         key = (path, path.stat().st_mtime_ns)

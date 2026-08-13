@@ -17,7 +17,11 @@
   `reaction-path.json` 생성과 구조 경로 재생
 - 현재 R0 구조 하나로 `r2SCAN-3c OPT`를 실행하고 실제 geometry/SCF 이력을 schema 2
   `reaction-path.json`으로 저장하는 최적화 경로 모드
-- 실제 geometry별 고유 SP/GBW, PAtom→MORead 연속 guess, 선택 MO cube 지연 생성과 signed-overlap 추적
+- 실제 geometry별 고유 SP/GBW, PAtom→MORead 연속 guess, 일반 geometry MO/density/plot 지연 생성
+- 일반 MO 선택과 명시적 signed-overlap MO Tracking 상태/API 분리, tracking metadata 재사용 및
+  현재 보간 frame surface만 lazy generation
+- single/path/surface/plot/tracking 공용 `WavefunctionContext`·canonical Cube와 bounded RAM/disk LRU;
+  PLY→Cube 순서 정리와 persistent step GBW 보호
 - 단일 job의 `result.json`과 반응 경로 job의 `reaction-path.json` 분리, 성공 job 종류에 따른
   프런트엔드 결과 자동 로드
 - H2O, CH4, F− 예제와 명시적 데모 계산 경로
@@ -36,9 +40,9 @@ Windows CP949 로캘에서 ORCA의 UTF-8 em dash를 OPI grepper가 읽지 못하
 
 ## 실행한 검증 (2026-08-14)
 
-- `python -m pytest -q -p no:cacheprovider --basetemp .test-tmp` → **90 passed, 1 deselected**
+- `python -m pytest -q -p no:cacheprovider --basetemp .test-tmp` → **99 passed, 1 deselected**
 - `python -m ruff check backend tests` → **All checks passed**
-- `npm.cmd test` → **11 files, 51 tests passed**
+- `npm.cmd test` → **11 files, 52 tests passed**
 - `npm.cmd run lint` → **0 errors**
 - `npm.cmd run build` → **성공**, Vite 2,250 modules transformed. Three.js/Plotly를 포함한 500 kB 초과 chunk 경고는 남음.
 - 실제 ORCA H₂ 최적화 경로 smoke → **schema 2, 실제 geometry 4개, step GBW 4개**, geometry별

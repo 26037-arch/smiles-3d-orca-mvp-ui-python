@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from ..cache import DerivedCacheManager
 from ..chemistry.opi_adapter import ChemistryError, OpiAdapter, _terminate_process_tree
 from ..config import LocalSettings
 from ..models import (
@@ -39,6 +40,7 @@ class JobManager:
         self.cancel_events: dict[UUID, threading.Event] = {}
         self.processes: dict[UUID, subprocess.Popen[str]] = {}
         self.lock = threading.RLock()
+        self.derived_cache = DerivedCacheManager(settings)
         self._recover_interrupted()
 
     def _job_dir(self, job_id: UUID) -> Path:
@@ -160,6 +162,11 @@ class JobManager:
         return record
 
     def _cleanup_completed_jobs(self) -> None:
+        # Reclaim reproducible data first. Persistent manifests, trajectories and
+        # especially step-XXX.gbw files are not managed by DerivedCacheManager.
+        for directory in self.root.iterdir():
+            if directory.is_dir():
+                self.derived_cache.enforce(directory)
         entries: list[tuple[float, Path, int]] = []
         total = 0
         for directory in self.root.iterdir():

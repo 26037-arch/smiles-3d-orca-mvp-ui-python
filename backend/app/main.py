@@ -23,11 +23,20 @@ async def lifespan(app: FastAPI):
     install_opi_utf8_compatibility()
     configure_orca_environment(settings.orca_path)
     app.state.jobs = JobManager(settings)
-    app.state.fields = CubeFieldService()
-    app.state.surfaces = SurfaceService(app.state.jobs, app.state.fields)
-    app.state.plots = PlotSamplingService(app.state.jobs, app.state.fields)
+    app.state.fields = CubeFieldService(app.state.jobs.derived_cache)
+    app.state.surfaces = SurfaceService(
+        app.state.jobs, app.state.fields, app.state.jobs.derived_cache
+    )
     app.state.ao = AOAnalysisService(app.state.jobs, settings)
-    app.state.reaction_paths = ReactionPathService(app.state.jobs)
+    app.state.reaction_paths = ReactionPathService(
+        app.state.jobs,
+        app.state.fields,
+        app.state.surfaces,
+        app.state.jobs.derived_cache,
+    )
+    app.state.plots = PlotSamplingService(
+        app.state.jobs, app.state.fields, app.state.reaction_paths
+    )
     yield
     app.state.jobs.executor.shutdown(wait=False, cancel_futures=True)
 

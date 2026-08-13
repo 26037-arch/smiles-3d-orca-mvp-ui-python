@@ -17,6 +17,14 @@ class LocalSettings(BaseModel):
     demo_calculations: bool = True
     jobs_dir: str = str(DATA_DIR / "jobs")
     max_job_bytes: int = 2_000_000_000
+    # Regenerable artifacts are bounded independently from persistent job data.
+    # Meshes are intentionally cheaper/more disposable than Cube fields.
+    max_derived_cache_bytes: int = 512_000_000
+    max_mesh_cache_entries: int = 96
+    max_cube_cache_entries: int = 48
+    max_tracking_cache_entries: int = 64
+    max_ram_cube_cache_bytes: int = 256_000_000
+    max_ram_overlap_entries: int = 512
 
 
 def load_settings() -> LocalSettings:

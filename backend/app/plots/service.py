@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from uuid import UUID
 
 import numpy as np
@@ -12,13 +13,25 @@ from .interpolation import trilinear_sample
 
 
 class PlotSamplingService:
-    def __init__(self, jobs: JobManager, fields: CubeFieldService):
+    def __init__(self, jobs: JobManager, fields: CubeFieldService, reaction_paths=None):
         self.jobs = jobs
         self.fields = fields
+        self.reaction_paths = reaction_paths
 
     def sample(self, job_id: UUID, request: PlotSampleRequest) -> dict[str, object]:
         record = self.jobs.get(job_id)
-        result = self.jobs.result(job_id)
+        context = None
+        if request.geometry_index is None:
+            result = self.jobs.result(job_id)
+        else:
+            if self.reaction_paths is None:
+                raise ValueError("reaction-path context is unavailable")
+            context = self.reaction_paths.wavefunction_context(
+                job_id, request.geometry_index
+            )
+            result = SimpleNamespace(
+                demo=False, orbitals=context.orbitals, optimized_atoms=context.atoms
+            )
         if record.mode == JobMode.DEMO or result.demo:
             raise ValueError("데모 작업에는 실제 파동함수 데이터가 없습니다")
         if request.field.field == "mo":
@@ -32,9 +45,14 @@ class PlotSamplingService:
             ):
                 raise ValueError("요청한 MO 정보가 계산 결과와 일치하지 않습니다")
         job_dir = self.jobs._job_dir(job_id)
-        cube, cache_hit = self.fields.load(
-            job_dir, request.field, resolution=request.cube_resolution
-        )
+        if context is None:
+            cube, cache_hit = self.fields.load(
+                job_dir, request.field, resolution=request.cube_resolution
+            )
+        else:
+            cube, cache_hit = self.fields.load_context(
+                job_dir, context, request.field, resolution=request.cube_resolution
+            )
         atom_lookup = {
             atom.id: np.asarray(atom.position, dtype=float) for atom in result.optimized_atoms
         }

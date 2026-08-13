@@ -4,24 +4,36 @@ import hashlib
 from pathlib import Path
 from uuid import UUID
 
+from ..cache import DerivedCacheManager
 from ..fields import CubeFieldService
 from ..jobs.manager import JobManager
 from ..models import JobMode, PlotField, SurfaceRecord, SurfaceRequest
 from .cube import read_cube
 from .mesh import cache_key, contour_to_ply, demo_surface_ply
+from ..wavefunction import WavefunctionContext
 
 
 class SurfaceService:
-    def __init__(self, jobs: JobManager, fields: CubeFieldService | None = None):
+    def __init__(
+        self,
+        jobs: JobManager,
+        fields: CubeFieldService | None = None,
+        cache: DerivedCacheManager | None = None,
+    ):
         self.jobs = jobs
         self.fields = fields
+        self.cache = cache
 
     def create(self, job_id: UUID, request: SurfaceRequest) -> SurfaceRecord:
         record = self.jobs.get(job_id)
         self.jobs.result(job_id)
         job_dir = self.jobs._job_dir(job_id)
-        surfaces = job_dir / "surfaces"
-        surfaces.mkdir(exist_ok=True)
+        surfaces = (
+            self.cache.directory(job_dir, "mesh")
+            if self.cache is not None
+            else job_dir / "surfaces"
+        )
+        surfaces.mkdir(parents=True, exist_ok=True)
         requested_phases = ["positive"] if request.field == "total_density" else (
             ["positive", "negative"] if request.display_mode == "both" else [request.display_mode]
         )
@@ -84,20 +96,109 @@ class SurfaceService:
                     level = request.isovalue if phase == "positive" else -request.isovalue
                     contour_to_ply(cube, level, output)
             urls[phase] = f"/api/jobs/{job_id}/surfaces/{key}/mesh"
+        if self.cache is not None:
+            protected = [surfaces / f"{key}.ply" for key in ids]
+            for path in protected:
+                if path.is_file():
+                    self.cache.record(path, protected=protected)
         surface_id = hashlib.sha256(":".join(ids).encode()).hexdigest()[:32]
         return SurfaceRecord(
             id=surface_id, field=request.field, orbital_index=request.orbital_index,
             isovalue=request.isovalue, phases=phases, cache_hit=all_hit, mesh_urls=urls,
         )
 
+    def create_for_context(
+        self,
+        job_id: UUID,
+        request: SurfaceRequest,
+        context: WavefunctionContext,
+    ) -> SurfaceRecord:
+        if self.fields is None:
+            raise RuntimeError("shared Cube field service is required")
+        job_dir = self.jobs._job_dir(job_id)
+        field = PlotField(
+            field=request.field,
+            orbital_internal_id=(
+                f"{request.spin}:{request.orbital_index}" if request.field == "mo" else None
+            ),
+            orbital_index=request.orbital_index,
+            spin=request.spin,
+        )
+        cube, _ = self.fields.load_context(job_dir, context, field, resolution=40)
+        digest = hashlib.sha256()
+        for value in (cube.origin, cube.axes, cube.values):
+            digest.update(value.tobytes())
+        cube_hash = digest.hexdigest()
+        requested_phases = (
+            ["positive"]
+            if request.field == "total_density"
+            else ["positive", "negative"]
+            if request.display_mode == "both"
+            else [request.display_mode]
+        )
+        phases = [
+            phase
+            for phase in requested_phases
+            if (phase == "positive" and float(cube.values.max()) >= request.isovalue)
+            or (phase == "negative" and float(cube.values.min()) <= -request.isovalue)
+        ]
+        if not phases:
+            raise ValueError("requested isovalue produces an empty surface")
+        surfaces = (
+            self.cache.directory(job_dir, "mesh")
+            if self.cache is not None
+            else job_dir / "surfaces"
+        )
+        surfaces.mkdir(parents=True, exist_ok=True)
+        urls: dict[str, str] = {}
+        ids: list[str] = []
+        all_hit = True
+        for phase in phases:
+            key = cache_key(
+                cube_hash,
+                request.field,
+                request.orbital_index,
+                request.spin,
+                phase,
+                request.isovalue,
+            )
+            ids.append(key)
+            output = surfaces / f"{key}.ply"
+            if not output.is_file():
+                all_hit = False
+                contour_to_ply(
+                    cube,
+                    request.isovalue if phase == "positive" else -request.isovalue,
+                    output,
+                )
+            urls[phase] = f"/api/jobs/{job_id}/surfaces/{key}/mesh"
+        if self.cache is not None:
+            protected = [surfaces / f"{key}.ply" for key in ids]
+            for path in protected:
+                self.cache.record(path, protected=protected)
+        return SurfaceRecord(
+            id=hashlib.sha256(":".join(ids).encode()).hexdigest()[:32],
+            field=request.field,
+            orbital_index=request.orbital_index,
+            isovalue=request.isovalue,
+            phases=phases,
+            cache_hit=all_hit,
+            mesh_urls=urls,
+        )
+
     def mesh_path(self, job_id: UUID, surface_id: str) -> Path:
         if len(surface_id) != 32 or any(c not in "0123456789abcdef" for c in surface_id):
             raise FileNotFoundError(surface_id)
-        path = (self.jobs._job_dir(job_id) / "surfaces" / f"{surface_id}.ply").resolve()
-        expected = (self.jobs._job_dir(job_id) / "surfaces").resolve()
-        if path.parent != expected or not path.is_file():
-            raise FileNotFoundError(surface_id)
-        return path
+        job_dir = self.jobs._job_dir(job_id)
+        directories = [job_dir / "cache" / "meshes", job_dir / "surfaces"]
+        for directory in directories:
+            expected = directory.resolve()
+            path = (directory / f"{surface_id}.ply").resolve()
+            if path.parent == expected and path.is_file():
+                if self.cache is not None and directory.name == "meshes":
+                    self.cache.record(path)
+                return path
+        raise FileNotFoundError(surface_id)
 
     @staticmethod
     def _find_or_generate_cube(job_dir: Path, request: SurfaceRequest) -> Path:

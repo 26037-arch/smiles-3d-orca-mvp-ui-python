@@ -33,6 +33,13 @@ export function BottomPanel({
   const [expandedBreakKeys, setExpandedBreakKeys] = useState<string[]>([])
   const scrollRef = useRef<HTMLDivElement>(null)
   const result = useProjectStore(state => state.result)
+  const calculationKind = useProjectStore(state => state.calculationKind)
+  const reactionPath = useProjectStore(state => state.reactionPath)
+  const reactionFrameIndex = useProjectStore(state => state.reactionFrameIndex)
+  const reactionFrame = reactionPath?.displayFrames[reactionFrameIndex]
+  const reactionImage = reactionFrame?.isCalculated
+    ? reactionPath?.path.images[reactionFrame.leftImageIndex]
+    : undefined
   const selected = useProjectStore(state => state.selectedOrbital)
   const setSelected = useProjectStore(state => state.setSelectedOrbital)
   const setError = useProjectStore(state => state.setError)
@@ -40,7 +47,10 @@ export function BottomPanel({
   const graphMoIds = useAnalysisStore(state => state.selectedMoIds)
   const addGraphMo = useAnalysisStore(state => state.addMo)
   const setGraphFieldMode = useAnalysisStore(state => state.setFieldMode)
-  const orbitals = useMemo(() => result?.orbitals ?? [], [result?.orbitals])
+  const orbitals = useMemo(
+    () => calculationKind === 'reaction-path' ? reactionImage?.orbitals ?? [] : result?.orbitals ?? [],
+    [calculationKind, reactionImage?.orbitals, result?.orbitals],
+  )
   const expandedBreakKeySet = useMemo(() => new Set(expandedBreakKeys), [expandedBreakKeys])
   const layout = useMemo(() => layoutEnergyLevels(orbitals, zoom, {
     breakThresholdEv,
@@ -52,7 +62,7 @@ export function BottomPanel({
     setZoom(1)
     setExpandedBreakKeys([])
     if (scrollRef.current) scrollRef.current.scrollTop = 0
-  }, [result?.job_id])
+  }, [result?.job_id, reactionImage?.index])
 
   useEffect(() => {
     const fitToViewport = () => onHeightChange(clampBottomPanelHeight(height, window.innerHeight))
@@ -150,7 +160,11 @@ export function BottomPanel({
             <span><small>수렴</small><b className="converged">SCF · Geometry</b></span>
             <span className="local-label">{result.local_minimum_notice}</span>
             {result.demo && <em>DEMO · 실제 계산 아님</em>}
-          </> : <span>계산 결과 없음</span>}
+          </> : reactionImage ? <>
+            <span><small>ORCA geometry</small><b>{reactionImage.index + 1}/{reactionPath?.path.images.length}</b></span>
+            <span><small>Geometry energy</small><b>{reactionImage.energyHartree?.toFixed(8) ?? '없음'} Eh</b></span>
+            <span className="local-label">SCF iteration별 MO가 아닌 geometry 수렴 wavefunction</span>
+          </> : <span>{calculationKind === 'reaction-path' ? '보간 표시 · 전자구조 값 없음' : '계산 결과 없음'}</span>}
           <button className="icon-button" onClick={() => setCollapsed(!collapsed)}><ChevronDown /></button>
         </div>
       </header>

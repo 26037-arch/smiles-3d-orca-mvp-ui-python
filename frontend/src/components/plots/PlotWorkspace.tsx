@@ -22,6 +22,13 @@ function fieldRequest(orbital?: Orbital): PlotSampleRequest['field'] {
 
 export function PlotWorkspace() {
   const result = useProjectStore(state => state.result)
+  const calculationKind = useProjectStore(state => state.calculationKind)
+  const reactionPath = useProjectStore(state => state.reactionPath)
+  const reactionFrameIndex = useProjectStore(state => state.reactionFrameIndex)
+  const reactionFrame = reactionPath?.displayFrames[reactionFrameIndex]
+  const reactionGeometryIndex = reactionFrame?.isCalculated ? reactionFrame.leftImageIndex : undefined
+  const reactionImage = reactionGeometryIndex !== undefined ? reactionPath?.path.images[reactionGeometryIndex] : undefined
+  const jobId = useProjectStore(state => state.project.lastCalculationId)
   const selection = useProjectStore(state => state.selection)
   const setError = useProjectStore(state => state.setError)
   const mode = useAnalysisStore(state => state.fieldMode)
@@ -41,7 +48,10 @@ export function PlotWorkspace() {
   const [samples, setSamples] = useState<Record<string, PlotSample>>({})
   const [loading, setLoading] = useState(false)
   const [sampleError, setSampleError] = useState<string>()
-  const orbitals = useMemo(() => result?.orbitals ?? [], [result?.orbitals])
+  const orbitals = useMemo(
+    () => calculationKind === 'reaction-path' ? reactionImage?.orbitals ?? [] : result?.orbitals ?? [],
+    [calculationKind, reactionImage?.orbitals, result?.orbitals],
+  )
   const selectedOrbitals = useMemo(
     () => orbitals.filter(orbital => selectedMoIds.includes(orbital.internal_id)),
     [orbitals, selectedMoIds],
@@ -65,7 +75,8 @@ export function PlotWorkspace() {
   }, [cutKind, lineAxis, offset, planeAxis, selection, source])
 
   useEffect(() => {
-    if (!result || !cut || result.demo) return
+    const sourceJobId = result?.job_id ?? (calculationKind === 'reaction-path' ? jobId : undefined)
+    if (!sourceJobId || !cut || result?.demo || (calculationKind === 'reaction-path' && reactionGeometryIndex === undefined)) return
     const fields = mode === 'mo' ? selectedOrbitals : [undefined]
     if (!fields.length) { setSamples({}); return }
     let cancelled = false
@@ -73,9 +84,10 @@ export function PlotWorkspace() {
     setSampleError(undefined)
     void Promise.all(fields.map(async orbital => {
       const field = fieldRequest(orbital)
-      const sample = await api.samplePlot(result.job_id, {
+      const sample = await api.samplePlot(sourceJobId, {
         field,
         cut,
+        geometryIndex: calculationKind === 'reaction-path' ? reactionGeometryIndex : undefined,
         bounds: { automatic: true, padding },
         line_samples: 512,
         plane_samples_u: 80,
@@ -89,9 +101,9 @@ export function PlotWorkspace() {
       if (!cancelled) setSampleError((error as Error).message)
     }).finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [cut, mode, padding, result, selectedOrbitals])
+  }, [calculationKind, cut, jobId, mode, padding, reactionGeometryIndex, result, selectedOrbitals])
 
-  if (!result || result.demo) return <div className="plot-workspace plot-unavailable"><button onClick={() => setMode('model')}><ArrowLeft /> 분자 화면</button><p>실제 ORCA 계산 결과가 있어야 파동함수 그래프를 만들 수 있습니다.</p></div>
+  if ((!result && (calculationKind !== 'reaction-path' || !jobId || reactionGeometryIndex === undefined)) || result?.demo) return <div className="plot-workspace plot-unavailable"><button onClick={() => setMode('model')}><ArrowLeft /> 분자 화면</button><p>{calculationKind === 'reaction-path' && reactionGeometryIndex === undefined ? '보간 프레임에는 계산된 파동함수 그래프가 없습니다. 실제 ORCA geometry를 선택하세요.' : '실제 ORCA 계산 결과가 있어야 파동함수 그래프를 만들 수 있습니다.'}</p></div>
 
   const displayed = mode === 'mo'
     ? selectedOrbitals.map((orbital, index) => ({ orbital, sample: samples[orbital.internal_id], color: COLORS[index] }))

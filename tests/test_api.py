@@ -152,3 +152,52 @@ def test_reaction_path_route_distinguishes_missing_and_invalid_source(monkeypatc
     assert missing.json()["detail"]["code"] == "REACTION_PATH_NOT_FOUND"
     assert invalid.status_code == 422
     assert invalid.json()["detail"]["code"] == "TRUNCATED_XYZ_FRAME"
+
+
+def test_reaction_tracking_and_geometry_surface_routes_are_separate(monkeypatch, tmp_path):
+    monkeypatch.setenv("GEOORCA_JOBS_DIR", str(tmp_path))
+    job_id = "00000000-0000-0000-0000-000000000006"
+    calls: list[tuple] = []
+
+    class FakeReactionPaths:
+        def track_orbital(self, received_job_id, orbital_id, source_geometry_index):
+            calls.append(("track", str(received_job_id), orbital_id, source_geometry_index))
+            return {"trackingId": "a" * 32, "steps": [], "active": True}
+
+        def create_geometry_surface(self, received_job_id, geometry_index, body):
+            calls.append(("geometry", str(received_job_id), geometry_index, body.field))
+            return {"mesh_urls": {"positive": "/mesh"}, "cache_hit": False}
+
+        def tracking_frame_surface(
+            self, received_job_id, tracking_id, frame_index, isovalue
+        ):
+            calls.append(
+                ("frame", str(received_job_id), tracking_id, frame_index, isovalue)
+            )
+            return {"frameIndex": frame_index, "meshUrls": {}, "cacheHit": False}
+
+    with TestClient(app) as client:
+        original = client.app.state.reaction_paths
+        client.app.state.reaction_paths = FakeReactionPaths()
+        try:
+            tracked = client.post(
+                f"/api/jobs/{job_id}/reaction-path/orbitals/track",
+                json={"orbital_id": "restricted:7", "source_geometry_index": 2},
+            )
+            geometry = client.post(
+                f"/api/jobs/{job_id}/reaction-path/geometries/2/surfaces",
+                json={"field": "mo", "orbital_index": 7},
+            )
+            frame = client.post(
+                f"/api/jobs/{job_id}/reaction-path/tracking/{'a' * 32}/frames/11/surface",
+                json={"isovalue": 0.04},
+            )
+        finally:
+            client.app.state.reaction_paths = original
+
+    assert tracked.status_code == geometry.status_code == frame.status_code == 200
+    assert calls == [
+        ("track", job_id, "restricted:7", 2),
+        ("geometry", job_id, 2, "mo"),
+        ("frame", job_id, "a" * 32, 11, 0.04),
+    ]

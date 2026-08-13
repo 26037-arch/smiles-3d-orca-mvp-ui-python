@@ -1,4 +1,4 @@
-import type { CalculationResult, Capabilities, JobCreateRequest, JobRecord, MoleculeProject, OrbitalComposition, OrbitalSpin, PlotSample, PlotSampleRequest, ReactionPathPlayback } from '../types'
+import type { CalculationResult, Capabilities, JobCreateRequest, JobRecord, MoleculeProject, OrbitalComposition, OrbitalSpin, OrbitalTrackingResult, PlotSample, PlotSampleRequest, ReactionPathPlayback } from '../types'
 
 export function apiErrorMessage(body: any, status: number, statusText: string): string {
   const detail = body?.detail?.message ?? body?.detail
@@ -28,7 +28,9 @@ export const api = {
   getJob: (id: string) => request<JobRecord>(`/api/jobs/${id}`),
   result: (id: string) => request<CalculationResult>(`/api/jobs/${id}/result`),
   reactionPath: (id: string, signal?: AbortSignal) => request<ReactionPathPlayback>(`/api/jobs/${id}/reaction-path`, { signal }),
-  reactionOrbitalTrack: (id: string, orbitalId: string, isovalue = 0.03, signal?: AbortSignal) => request<{ orbitalId: string; threshold: number; active: boolean; steps: Array<{ leftImageIndex: number; rightImageIndex: number; match: import('../types').OrbitalMatch; phaseSign: number }>; frameSurfaces: Record<string, Record<string, string>> }>(`/api/jobs/${id}/reaction-path/orbitals/track`, { method: 'POST', body: JSON.stringify({ orbital_id: orbitalId, isovalue }), signal }),
+  reactionOrbitalTrack: (id: string, orbitalId: string, sourceGeometryIndex: number, signal?: AbortSignal) => request<OrbitalTrackingResult>(`/api/jobs/${id}/reaction-path/orbitals/track`, { method: 'POST', body: JSON.stringify({ orbital_id: orbitalId, source_geometry_index: sourceGeometryIndex }), signal }),
+  reactionGeometrySurface: (id: string, geometryIndex: number, body: any) => request<any>(`/api/jobs/${id}/reaction-path/geometries/${geometryIndex}/surfaces`, { method: 'POST', body: JSON.stringify(body) }),
+  trackingFrameSurface: (id: string, trackingId: string, frameIndex: number, isovalue: number, signal?: AbortSignal) => request<{ frameIndex: number; meshUrls: Record<string, string>; cacheHit: boolean }>(`/api/jobs/${id}/reaction-path/tracking/${trackingId}/frames/${frameIndex}/surface`, { method: 'POST', body: JSON.stringify({ isovalue }), signal }),
   cancel: (id: string) => request<JobRecord>(`/api/jobs/${id}/cancel`, { method: 'POST' }),
   surface: (id: string, body: any) => request<any>(`/api/jobs/${id}/surfaces`, { method: 'POST', body: JSON.stringify(body) }),
   composition: (id: string, spin: OrbitalSpin, orcaIndex: number, offset = 0, limit = 5, signal?: AbortSignal) => request<OrbitalComposition>(`/api/jobs/${id}/orbitals/${spin}/${orcaIndex}/composition?offset=${offset}&limit=${limit}`, { signal }),

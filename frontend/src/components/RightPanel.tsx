@@ -87,12 +87,22 @@ function BondsAndPlanes() {
 
 function SurfaceControl({ layer }: { layer: SurfaceLayer }) {
   const result = useProjectStore(s => s.result); const upsert = useProjectStore(s => s.upsertSurface); const remove = useProjectStore(s => s.removeSurface)
+  const jobId = useProjectStore(s => s.project.lastCalculationId)
   const [isovalue, setIso] = useState(layer.isovalue)
   useEffect(() => {
     if (!layer.visible) return
     if (layer.reactionFrame) {
       if (Math.abs(layer.isovalue - isovalue) > 1e-12) upsert({ ...layer, isovalue })
       return
+    }
+    if (layer.reactionGeometryIndex !== undefined) {
+      if (!jobId) return
+      const timer = window.setTimeout(async () => {
+        const pending = { ...layer, isovalue, loading: true, error: undefined }; upsert(pending)
+        try { const response = await api.reactionGeometrySurface(jobId, layer.reactionGeometryIndex!, surfaceRequestForLayer(pending)); upsert({ ...pending, loading: false, meshUrls: response.mesh_urls, cacheHit: response.cache_hit }) }
+        catch (e) { upsert({ ...pending, loading: false, error: (e as Error).message }) }
+      }, 300)
+      return () => window.clearTimeout(timer)
     }
     if (!result) return
     const timer = window.setTimeout(async () => {
@@ -104,7 +114,7 @@ function SurfaceControl({ layer }: { layer: SurfaceLayer }) {
     // layer key identifies stable controls; opacity is renderer-only and intentionally excluded.
   // The layer object is replaced by upsert; primitive request inputs are the trigger.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isovalue, layer.visible, layer.reactionFrame, result?.job_id])
+  }, [isovalue, layer.visible, layer.reactionFrame, layer.reactionGeometryIndex, result?.job_id, jobId])
   return <div className="surface-card"><div><input type="checkbox" checked={layer.visible} onChange={e => upsert({ ...layer, visible: e.target.checked })} /><strong>{layer.name}</strong>{layer.loading && <span className="tiny-status">생성 중</span>}{layer.cacheHit && <span className="tiny-status cache">cache</span>}<button className="icon-button" onClick={() => remove(layer.key)}><Trash2 /></button></div><label>등밀도값 <input type="number" min="0.0001" step="0.005" value={isovalue} onChange={e => setIso(Math.max(.0001, Number(e.target.value)))} /></label><input aria-label="등밀도값 로그 슬라이더" type="range" min="-4" max="-0.3" step="0.02" value={Math.log10(isovalue)} onChange={e => setIso(10 ** Number(e.target.value))} /><label>투명도 <b>{layer.opacity.toFixed(2)}</b><input type="range" min="0" max="1" step="0.01" value={layer.opacity} onChange={e => upsert({ ...layer, opacity: Number(e.target.value) })} /></label>{layer.error && <p className="inline-error">{layer.error}</p>}</div>
 }
 
@@ -114,13 +124,19 @@ function SurfacesPanel() {
   const reactionPath = useProjectStore(s => s.reactionPath)
   const reactionFrameIndex = useProjectStore(s => s.reactionFrameIndex)
   const displayFrame = reactionPath?.displayFrames[reactionFrameIndex]
-  const reactionImage = displayFrame ? reactionPath?.path.images[displayFrame.leftImageIndex] : undefined
+  const reactionImage = displayFrame?.isCalculated ? reactionPath?.path.images[displayFrame.leftImageIndex] : undefined
   const reactionOrbitals = reactionImage?.orbitals
   const availableOrbitals = useMemo(
     () => calculationKind === 'reaction-path' ? reactionOrbitals ?? [] : result?.orbitals ?? [],
     [calculationKind, reactionOrbitals, result?.orbitals],
   )
-  const reactionHasWavefunctions = Boolean(reactionPath?.path.images[0]?.wavefunctionRef)
+  const reactionHasWavefunctions = Boolean(reactionImage?.wavefunctionRef)
+  const trackingEnabled = useProjectStore(s => s.trackingEnabled)
+  const trackingLoading = useProjectStore(s => s.trackingLoading)
+  const trackingSource = useProjectStore(s => s.trackingSourceOrbitalId)
+  const trackingError = useProjectStore(s => s.trackingError)
+  const beginTracking = useProjectStore(s => s.beginMoTracking)
+  const stopTracking = useProjectStore(s => s.stopMoTracking)
   const [extraOrbitalId, setExtraOrbitalId] = useState('')
   const frontier = useMemo(() => frontierOrbitals(availableOrbitals, result?.homo_internal_id), [availableOrbitals, result?.homo_internal_id])
   const extraOrbital = availableOrbitals.find(orbital => orbital.internal_id === extraOrbitalId)
@@ -129,15 +145,41 @@ function SurfacesPanel() {
   }, [availableOrbitals, result?.job_id, selected])
   const addLayer = (orbital?: Orbital) => {
     if (orbital) setSelected(orbital.internal_id)
-    if (calculationKind === 'reaction-path' && orbital) return
+    if (calculationKind === 'reaction-path') {
+      if (!displayFrame?.isCalculated) return setError('보간 프레임에는 계산된 전자구조가 없습니다. 실제 ORCA geometry를 선택하세요.')
+      const layer = createSurfaceLayer(orbital)
+      upsert({
+        ...layer,
+        key: orbital ? 'reaction-step-mo' : 'reaction-step-density',
+        name: `Geometry ${displayFrame.leftImageIndex + 1} · ${layer.name}`,
+        reactionGeometryIndex: displayFrame.leftImageIndex,
+      })
+      return
+    }
     if (!result) return setError('먼저 계산 결과가 필요합니다')
     const update = toggleSurfaceLayer(layers, orbital)
     if (update.error) return setError(update.error)
     if (update.layer) upsert(update.layer)
   }
   if (!result && !reactionPath) return <p className="empty-state">계산 결과가 없으므로 표면을 만들 수 없습니다. ORCA가 없으면 명시적인 데모 결과로 UI를 시험할 수 있습니다.</p>
-  const reactionMoDisabled = calculationKind === 'reaction-path' && !reactionHasWavefunctions
-  return <><button className="wide surface-add" disabled={calculationKind === 'reaction-path'} onClick={() => addLayer()}><Layers3 /> 전체 전자 밀도 켜기/끄기</button><p className="help">MO의 ± 색은 확률 부호가 아니라 파동함수의 위상입니다. 최적화 경로 MO cube는 선택 시 지연 생성됩니다.</p>{reactionMoDisabled && <p className="inline-error">이 경로에는 첫 geometry의 파동함수가 없어 MO 추적을 시작할 수 없습니다.</p>}<div className="mo-list-heading">Frontier orbitals</div><div className="orbital-chips">{frontier.map(o => <button key={o.internal_id} disabled={reactionMoDisabled} className={selected === o.internal_id ? 'active' : ''} onClick={() => addLayer(o)}>{o.spin === 'alpha' ? 'α ' : o.spin === 'beta' ? 'β ' : ''}{o.label ?? `MO ${o.display_number}`}<small>{(o.energy_hartree * 27.211386).toFixed(2)} eV</small></button>)}</div><div className="mo-browser"><strong>다른 MO 불러오기</strong><select aria-label="MO 선택" disabled={reactionMoDisabled} value={extraOrbitalId} onChange={event => { setExtraOrbitalId(event.target.value); setSelected(event.target.value || undefined) }}><option value="">MO 선택</option>{availableOrbitals.map(orbital => <option key={orbital.internal_id} value={orbital.internal_id}>{orbitalOptionLabel(orbital)}</option>)}</select>{extraOrbital && <div className="mo-selection"><span>선택된 MO <b>{extraOrbital.spin === 'alpha' ? 'α ' : extraOrbital.spin === 'beta' ? 'β ' : ''}MO {extraOrbital.display_number}{extraOrbital.label ? ` · ${extraOrbital.label}` : ''}</b></span><span>에너지 <b>{(extraOrbital.energy_hartree * 27.211386245988).toFixed(2)} eV</b></span><span>점유수 <b>{extraOrbital.occupancy.toFixed(1)}</b></span><span>Spin <b>{extraOrbital.spin}</b></span></div>}<button className="wide" disabled={!extraOrbital || reactionMoDisabled} onClick={() => addLayer(extraOrbital)}><Plus /> 표면 추가</button></div>{layers.filter(layer => layer.field !== 'ao_component').map(layer => <SurfaceControl key={layer.key} layer={layer} />)}</>
+  const reactionMoDisabled = calculationKind === 'reaction-path' && (!reactionHasWavefunctions || !displayFrame?.isCalculated || reactionImage?.convergence === 'unconverged')
+  return <>
+    <button className="wide surface-add" disabled={calculationKind === 'reaction-path' && reactionMoDisabled} onClick={() => addLayer()}><Layers3 /> 현재 geometry 전체 전자 밀도</button>
+    <p className="help">MO 선택은 현재 실제 geometry만 표시합니다. 경로 전체 중첩 계산은 MO Tracking 버튼을 눌렀을 때만 시작됩니다.</p>
+    {reactionMoDisabled && calculationKind === 'reaction-path' && <p className="inline-error">{!displayFrame?.isCalculated ? '보간 표시는 계산 geometry가 아니므로 MO 분석을 제공하지 않습니다.' : reactionImage?.convergence === 'unconverged' ? '이 geometry의 SCF가 수렴하지 않아 전자구조 분석을 비활성화했습니다.' : '이 geometry에는 사용할 wavefunction이 없습니다.'}</p>}
+    <div className="mo-list-heading">Frontier orbitals</div>
+    <div className="orbital-chips">{frontier.map(o => <button key={o.internal_id} disabled={reactionMoDisabled} className={selected === o.internal_id ? 'active' : ''} onClick={() => addLayer(o)}>{o.spin === 'alpha' ? 'α ' : o.spin === 'beta' ? 'β ' : ''}{o.label ?? `MO ${o.display_number}`}<small>{(o.energy_hartree * 27.211386).toFixed(2)} eV</small></button>)}</div>
+    <div className="mo-browser">
+      <strong>다른 MO 불러오기</strong>
+      <select aria-label="MO 선택" disabled={reactionMoDisabled} value={extraOrbitalId} onChange={event => { setExtraOrbitalId(event.target.value); setSelected(event.target.value || undefined) }}><option value="">MO 선택</option>{availableOrbitals.map(orbital => <option key={orbital.internal_id} value={orbital.internal_id}>{orbitalOptionLabel(orbital)}</option>)}</select>
+      {extraOrbital && <div className="mo-selection"><span>선택된 MO <b>{extraOrbital.spin === 'alpha' ? 'α ' : extraOrbital.spin === 'beta' ? 'β ' : ''}MO {extraOrbital.display_number}{extraOrbital.label ? ` · ${extraOrbital.label}` : ''}</b></span><span>에너지 <b>{(extraOrbital.energy_hartree * 27.211386245988).toFixed(2)} eV</b></span><span>점유수 <b>{extraOrbital.occupancy.toFixed(1)}</b></span><span>Spin <b>{extraOrbital.spin}</b></span></div>}
+      <button className="wide" disabled={!extraOrbital || reactionMoDisabled} onClick={() => addLayer(extraOrbital)}><Plus /> 현재 geometry 표면 표시</button>
+      {calculationKind === 'reaction-path' && <button className="wide" disabled={!trackingEnabled && (!selected || reactionMoDisabled)} onClick={trackingEnabled ? stopTracking : beginTracking}>{trackingEnabled ? 'MO Tracking 해제' : trackingLoading ? 'MO Tracking 준비 중…' : 'MO Tracking 시작'}</button>}
+      {trackingEnabled && <p className="help">추적 기준: {trackingSource}</p>}
+      {trackingError && <p className="inline-error">{trackingError}</p>}
+    </div>
+    {layers.filter(layer => layer.field !== 'ao_component').map(layer => <SurfaceControl key={layer.key} layer={layer} />)}
+  </>
 }
 
 function AOCompositionPanel({ capabilities }: { capabilities?: Capabilities }) {

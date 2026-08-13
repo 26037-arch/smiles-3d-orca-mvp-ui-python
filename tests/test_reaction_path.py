@@ -23,6 +23,8 @@ from backend.app.reaction_path.orbitals import (
     interpolate_scalar_fields,
 )
 from backend.app.reaction_path.service import EV_TO_HARTREE, ReactionPathError, ReactionPathService
+from backend.app.cache import DerivedCacheManager
+from backend.app.config import LocalSettings
 from backend.app.surfaces.cube import CubeData
 
 
@@ -145,3 +147,76 @@ def test_overlap_threshold_assignment_and_terminal_tracking():
     tracker = OrbitalTracker("a")
     assert tracker.advance("b", 0.59).status == "below-threshold"
     assert tracker.advance("c", 0.99).status == "below-threshold"
+
+
+def test_tracking_is_explicit_metadata_only_and_frame_meshes_are_lazy(
+    monkeypatch, tmp_path
+):
+    raw = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    for index, image in enumerate(raw["images"]):
+        image["wavefunctionRef"] = f"step-{index:03d}.gbw"
+        image["orbitals"] = [
+            {
+                "internal_id": "restricted:7",
+                "orca_index": 7,
+                "display_number": 8,
+                "energy_hartree": -0.2 + index * 0.01,
+                "occupancy": 2,
+            }
+        ]
+        (tmp_path / image["wavefunctionRef"]).write_bytes(b"gbw")
+    (tmp_path / "reaction-path.json").write_text(json.dumps(raw), encoding="utf-8")
+
+    class FakeFields:
+        def ensure_context(self, job_dir, context, _field, *, resolution):
+            path = job_dir / "cache" / "cubes" / f"geometry-{context.geometry_index}.cube"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("cube", encoding="ascii")
+            return path, path.exists()
+
+    settings = LocalSettings(
+        jobs_dir=str(tmp_path), max_mesh_cache_entries=4, max_derived_cache_bytes=100_000
+    )
+    service = ReactionPathService(
+        FakeJobs(tmp_path),
+        fields=FakeFields(),
+        cache=DerivedCacheManager(settings),
+    )
+    overlap_calls: list[tuple[Path, Path]] = []
+
+    def overlap(left, right, *_args):
+        overlap_calls.append((left, right))
+        return -0.9
+
+    monkeypatch.setattr(service, "_signed_overlap", overlap)
+    tracked = service.track_orbital(uuid4(), "restricted:7", 1)
+
+    assert tracked["sourceGeometryIndex"] == 1
+    assert [step["geometry"] for step in tracked["steps"]] == [0, 1, 2]
+    assert len(overlap_calls) == 2
+    assert not list((tmp_path / "cache" / "tracking").glob("*.ply"))
+
+    cached = service.track_orbital(uuid4(), "restricted:7", 1)
+    assert cached["cacheHit"] is True
+    assert len(overlap_calls) == 2
+
+    values = np.asarray([[[-1.0, 1.0], [1.0, -1.0]], [[1.0, -1.0], [-1.0, 1.0]]])
+    monkeypatch.setattr(service, "_load_cube", lambda _path: cube(values))
+    generated: list[Path] = []
+
+    def contour(_cube, _level, output):
+        generated.append(output)
+        output.write_bytes(b"ply")
+
+    monkeypatch.setattr("backend.app.reaction_path.service.contour_to_ply", contour)
+    frame = service.tracking_frame_surface(
+        uuid4(), tracked["trackingId"], 1, isovalue=0.03
+    )
+    assert frame["cacheHit"] is False
+    assert len(generated) == 2
+    assert len(list((tmp_path / "cache" / "tracking").glob("*.ply"))) == 2
+    again = service.tracking_frame_surface(
+        uuid4(), tracked["trackingId"], 1, isovalue=0.03
+    )
+    assert again["cacheHit"] is True
+    assert len(generated) == 2

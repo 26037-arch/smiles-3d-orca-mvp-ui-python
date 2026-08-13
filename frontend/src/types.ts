@@ -158,6 +158,22 @@ export interface OrbitalMatch {
   status: 'matched' | 'below-threshold' | 'ambiguous'
 }
 
+export interface OrbitalTrackingResult {
+  trackingId: string
+  sourceOrbital: string
+  sourceGeometryIndex: number
+  threshold: number
+  active: boolean
+  steps: Array<{ geometry: number; orbital: string; phase: number }>
+  transitions: Array<{
+    leftImageIndex: number
+    rightImageIndex: number
+    match: OrbitalMatch
+    phaseSign: number
+  }>
+  cacheHit: boolean
+}
+
 export interface Orbital {
   internal_id: string
   orca_index: number
@@ -200,6 +216,7 @@ export interface SurfaceLayer {
   cacheHit?: boolean
   error?: string
   reactionFrame?: boolean
+  reactionGeometryIndex?: number
 }
 
 export interface Capabilities {
@@ -267,6 +284,7 @@ export interface PlotSampleRequest {
     spin?: OrbitalSpin
   }
   cut: PlotCut
+  geometryIndex?: number
   bounds: { automatic: boolean; padding: number }
   line_samples?: number
   plane_samples_u?: number

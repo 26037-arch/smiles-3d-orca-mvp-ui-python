@@ -493,6 +493,7 @@ class PlotBounds(StrictModel):
 class PlotSampleRequest(StrictModel):
     field: PlotField
     cut: AxisLineCut | AtomLineCut | AxisPlaneCut | AtomPlaneCut
+    geometry_index: int | None = Field(default=None, alias="geometryIndex", ge=0)
     bounds: PlotBounds = Field(default_factory=PlotBounds)
     line_samples: Annotated[int, Field(ge=32, le=4096)] = 512
     plane_samples_u: Annotated[int, Field(ge=16, le=256)] = 96

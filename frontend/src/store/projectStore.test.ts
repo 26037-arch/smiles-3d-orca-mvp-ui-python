@@ -125,4 +125,22 @@ describe('reaction path state', () => {
     expect(useProjectStore.getState().calculationKind).toBe('single')
     expect(useProjectStore.getState().project.atoms[1].position[0]).toBeCloseTo(.9)
   })
+
+  it('keeps ordinary MO selection separate from explicit tracking state', () => {
+    const project = newProject(); project.atoms = [
+      { id: 'a', element: 'H', position: [0, 0, 0] }, { id: 'b', element: 'H', position: [.7, 0, 0] },
+    ]
+    useProjectStore.getState().setProject(project)
+    useProjectStore.getState().applyReactionPath(reactionPlayback())
+    useProjectStore.getState().setSelectedOrbital('restricted:7')
+    expect(useProjectStore.getState().trackingEnabled).toBe(false)
+
+    useProjectStore.getState().beginMoTracking()
+    expect(useProjectStore.getState().trackingSourceOrbitalId).toBe('restricted:7')
+    useProjectStore.getState().setSelectedOrbital('restricted:8')
+    expect(useProjectStore.getState().trackingSourceOrbitalId).toBe('restricted:7')
+
+    useProjectStore.getState().stopMoTracking()
+    expect(useProjectStore.getState().trackingEnabled).toBe(false)
+  })
 })

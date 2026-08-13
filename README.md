@@ -114,20 +114,29 @@ MO만 비활성화하지만 첫 step과 마지막 step 실패는 작업 실패�
 읽기 호환성을 유지하고, 독립 NEB 어댑터도 레거시 코드 경계에 남아 있지만 새 UI에서는 호출하지 않는다.
 
 재생은 각 geometry의 SCF 반복 동안 좌표를 고정한 뒤 다음 geometry로 움직인다. geometry 에너지와
-현재 SCF 에너지는 별도 그래프다. 표시 프레임 간격은 물리적 시간이 아니다. MO를 선택할 때에만
-필요한 cube를 만들고, 같은 spin의 현재 추적 index ±5 후보에서 signed overlap으로 다음 MO를 찾는다.
-`wavefunctionRef`는 작업 폴더 밖으로 나갈 수 없다.
+현재 SCF 에너지는 별도 그래프다. 표시 프레임 간격은 물리적 시간이 아니다. 실제 geometry에서 MO나
+density를 선택하면 그 geometry의 표면과 plot만 만들며 추적은 실행하지 않는다. 별도 `MO Tracking 시작`
+동작이 현재 geometry/MO를 source로 고정한 뒤에만 같은 spin의 현재 index ±5 후보에서 signed overlap을
+계산한다. `wavefunctionRef`는 작업 폴더 밖으로 나갈 수 없다.
 
 백엔드는 첫 계산 지점을 기준으로 질량 가중 Kabsch 정렬을 하고, 단조 반응좌표 또는 정렬 좌표의
 누적 길이를 0..1로 정규화한다. 표시 좌표는 구간별 cubic Hermite로 만들며 두 지점뿐인 경로,
 불안정한 접선·급격한 방향 반전, 과도한 overshoot, 새 원자 겹침, 비유한 결과에서는 해당 구간을
 선형 보간한다. 기본 구간 샘플 수는 `backend/app/reaction_path/geometry.py`의 한 상수로 관리한다.
 
-선택한 MO만 같은 spin의 ±5 후보에서 공통 cube 격자 signed overlap으로 추적한다. 절댓값 중첩이
+명시적으로 추적을 시작한 MO만 같은 spin의 ±5 후보에서 공통 cube 격자 signed overlap으로 추적한다. 절댓값 중첩이
 0.60 미만이면 branch를 영구 종료하고, 음의 signed overlap이면 다음 표시 field의 위상을 뒤집는다.
-위상 정렬한 scalar field를 먼저 보간한 뒤 각 표시 프레임의 등치면을 작업 디렉터리에 지연 생성한다.
+추적 결과는 작은 metadata로 캐시하고, 위상 정렬한 scalar field의 등치면은 현재 요청한 표시 프레임만
+지연 생성한다. 전체 보간 프레임 PLY를 한 번에 만들지 않는다.
 원본 cube는 수정하거나 삭제하지 않는다. 준축퇴 오비탈은 현재 단일 오비탈 배정만 사용하므로
 후속 부분공간 추적 확장 지점으로 남아 있다.
+
+파생 파일은 `cache/cubes`, `cache/meshes`, `cache/tracking`에 분리한다. Cube는 surface·line plot·plane
+plot·tracking이 같은 canonical key를 공유하고 isovalue 변경은 mesh만 다시 만든다. 디스크 정리는
+tracking PLY → 일반 PLY → Cube → tracking metadata 순서이며 현재 표시 중인 파일은 보호한다.
+`step-NNN.gbw`와 manifest/trajectory는 persistent artifact라서 파생 캐시 정리 대상이 아니다. 한도는
+`LocalSettings`의 `max_derived_cache_bytes`, `max_mesh_cache_entries`, `max_cube_cache_entries`,
+`max_tracking_cache_entries`에서 관리하고, parsed Cube/overlap RAM cache도 별도 LRU 한도를 사용한다.
 
 ## 테스트와 검사
 

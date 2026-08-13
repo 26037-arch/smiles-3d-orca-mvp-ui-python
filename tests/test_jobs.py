@@ -98,6 +98,40 @@ def test_uuid_job_paths_cannot_traverse(tmp_path):
     manager.executor.shutdown()
 
 
+def test_storage_cleanup_reclaims_derived_files_before_deleting_completed_job(tmp_path):
+    job_id = uuid4()
+    folder = tmp_path / str(job_id)
+    folder.mkdir()
+    record = JobRecord(
+        id=job_id,
+        state=JobState.SUCCEEDED,
+        mode=JobMode.ORCA,
+        created_at=now(),
+        updated_at=now(),
+    )
+    (folder / "job.json").write_text(record.model_dump_json(), encoding="utf-8")
+    (folder / "step-000.gbw").write_bytes(b"persistent")
+    mesh = folder / "cache" / "tracking" / "frame.ply"
+    mesh.parent.mkdir(parents=True)
+    mesh.write_bytes(b"derived-cache")
+    persistent_size = (folder / "job.json").stat().st_size + (folder / "step-000.gbw").stat().st_size
+    manager = JobManager(
+        LocalSettings(
+            jobs_dir=str(tmp_path),
+            max_job_bytes=persistent_size,
+            max_derived_cache_bytes=0,
+            max_mesh_cache_entries=10,
+        )
+    )
+
+    manager._cleanup_completed_jobs()
+
+    assert folder.is_dir()
+    assert (folder / "step-000.gbw").is_file()
+    assert not mesh.exists()
+    manager.executor.shutdown()
+
+
 def test_successful_job_runs_reaction_path_completion_hook(
     tmp_path, water_project, monkeypatch
 ):

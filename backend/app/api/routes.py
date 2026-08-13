@@ -78,6 +78,12 @@ class OrcaPathUpdate(BaseModel):
 class ReactionOrbitalTrackRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     orbital_id: str
+    source_geometry_index: int = 0
+    isovalue: float = 0.03  # accepted for compatibility; tracking metadata ignores it
+
+
+class TrackingFrameSurfaceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     isovalue: float = 0.03
 
 
@@ -153,13 +159,56 @@ def track_reaction_path_orbital(job_id: UUID, body: ReactionOrbitalTrackRequest,
     from ..reaction_path import ReactionPathError
 
     try:
-        if not 0 < body.isovalue < 100:
-            raise ReactionPathError("INVALID_ISOVALUE", "등밀도값은 0보다 커야 합니다")
-        return reaction_paths(request).track_orbital(job_id, body.orbital_id, body.isovalue)
+        return reaction_paths(request).track_orbital(
+            job_id, body.orbital_id, body.source_geometry_index
+        )
     except ReactionPathError as exc:
         raise error(422, exc.code, exc.detail) from exc
     except (OSError, ValueError) as exc:
         raise error(422, "ORBITAL_TRACKING_FAILED", str(exc)) from exc
+
+
+@router.post("/jobs/{job_id}/reaction-path/geometries/{geometry_index}/surfaces")
+def create_reaction_geometry_surface(
+    job_id: UUID,
+    geometry_index: int,
+    body: SurfaceRequest,
+    request: Request,
+):
+    from ..reaction_path import ReactionPathError
+
+    try:
+        return reaction_paths(request).create_geometry_surface(
+            job_id, geometry_index, body
+        )
+    except ReactionPathError as exc:
+        raise error(422, exc.code, exc.detail) from exc
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise error(422, "SURFACE_GENERATION_FAILED", str(exc)) from exc
+
+
+@router.post(
+    "/jobs/{job_id}/reaction-path/tracking/{tracking_id}/frames/{frame_index}/surface"
+)
+def create_tracking_frame_surface(
+    job_id: UUID,
+    tracking_id: str,
+    frame_index: int,
+    body: TrackingFrameSurfaceRequest,
+    request: Request,
+):
+    from ..reaction_path import ReactionPathError
+
+    try:
+        if not 0 < body.isovalue < 100:
+            raise ReactionPathError("INVALID_ISOVALUE", "isovalue must be positive")
+        return reaction_paths(request).tracking_frame_surface(
+            job_id, tracking_id, frame_index, body.isovalue
+        )
+    except ReactionPathError as exc:
+        raise error(422, exc.code, exc.detail) from exc
+    except (OSError, ValueError) as exc:
+        raise error(422, "TRACKING_SURFACE_GENERATION_FAILED", str(exc)) from exc
 
 
 @router.get("/jobs/{job_id}/reaction-path/surfaces/{surface_id}/mesh")

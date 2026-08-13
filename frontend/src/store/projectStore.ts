@@ -46,9 +46,17 @@ export interface ProjectStore {
   reactionPath?: ReactionPathPlayback
   reactionProject?: MoleculeProject
   reactionFrameIndex: number
+  selectedGeometryIndex: number
   reactionScfIterationIndex: number
   reactionError?: string
   reactionCopyPrompt: boolean
+  trackingEnabled: boolean
+  trackingSourceOrbitalId?: string
+  trackingSourceGeometryIndex?: number
+  trackingId?: string
+  trackingActive?: boolean
+  trackingLoading: boolean
+  trackingError?: string
   setTool(tool: Tool): void
   setAddElement(element: string): void
   selectAtom(id: string, additive?: boolean): void
@@ -90,6 +98,10 @@ export interface ProjectStore {
   setReactionFrame(index: number): void
   setReactionScfIteration(index: number): void
   setReactionPlaying(playing: boolean): void
+  beginMoTracking(): void
+  completeMoTracking(trackingId: string, active: boolean): void
+  failMoTracking(message: string): void
+  stopMoTracking(): void
   copyReactionFrameToSingle(): void
   dismissReactionCopyPrompt(): void
 }
@@ -126,7 +138,8 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   project: newProject(), viewStructure: 'initial', selection: [], tool: 'select', addElement: 'C', toolAtoms: [],
   history: { past: [], future: [] }, surfaces: [], orbitEnabled: true, aoMode: false,
   calculationKind: 'single', reactionStatus: 'idle', reactionFrameIndex: 0,
-  reactionScfIterationIndex: 0, reactionCopyPrompt: false,
+  selectedGeometryIndex: 0, reactionScfIterationIndex: 0, reactionCopyPrompt: false,
+  trackingEnabled: false, trackingLoading: false,
   setTool: tool => {
     const state = get()
     if (state.reactionStatus === 'playing' && structureTools.has(tool)) {
@@ -216,7 +229,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   togglePlane: id => { const state = get(); if (blockReactionEdit(state, set)) return; set(withCommand(state, { ...state.project, sketchPlanes: state.project.sketchPlanes.map(p => p.id === id ? { ...p, visible: !p.visible } : p) })) },
   applyDistance: (ids, target) => { const state = get(); if (blockReactionEdit(state, set)) return; try { set(withCommand(state, { ...state.project, atoms: changeDistance(state.project.atoms, state.project.bonds, ...ids, target) })) } catch (e) { set({ error: (e as Error).message }) } },
   applyAngle: (ids, target, camera) => { const state = get(); if (blockReactionEdit(state, set)) return; try { set(withCommand(state, { ...state.project, atoms: changeAngle(state.project.atoms, state.project.bonds, ...ids, target, camera) })) } catch (e) { set({ error: (e as Error).message }) } },
-  setProject: project => set({ project: refreshPlanes(project), optimizedProject: undefined, viewStructure: 'initial', selection: [], history: { past: [], future: [] }, result: undefined, surfaces: [], aoMode: false, aoOrbitalId: undefined, aoSurfaceSnapshot: undefined, error: undefined, calculationKind: 'single', reactionStatus: 'idle', reactionPath: undefined, reactionProject: undefined, reactionFrameIndex: 0, reactionScfIterationIndex: 0, reactionError: undefined, reactionCopyPrompt: false }),
+  setProject: project => set({ project: refreshPlanes(project), optimizedProject: undefined, viewStructure: 'initial', selection: [], history: { past: [], future: [] }, result: undefined, surfaces: [], aoMode: false, aoOrbitalId: undefined, aoSurfaceSnapshot: undefined, error: undefined, calculationKind: 'single', reactionStatus: 'idle', reactionPath: undefined, reactionProject: undefined, reactionFrameIndex: 0, selectedGeometryIndex: 0, reactionScfIterationIndex: 0, reactionError: undefined, reactionCopyPrompt: false, trackingEnabled: false, trackingSourceOrbitalId: undefined, trackingSourceGeometryIndex: undefined, trackingId: undefined, trackingActive: undefined, trackingLoading: false, trackingError: undefined }),
   updateProject: patch => { const state = get(); set(withCommand(state, { ...state.project, ...patch })) },
   undo: () => { const state = get(); const previous = state.history.past.at(-1); if (previous) set({ project: previous, history: { past: state.history.past.slice(0, -1), future: [state.project, ...state.history.future] }, selection: [] }) },
   redo: () => { const state = get(); const next = state.history.future[0]; if (next) set({ project: next, history: { past: [...state.history.past, state.project], future: state.history.future.slice(1) }, selection: [] }) },
@@ -252,6 +265,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     tool: calculationKind === 'single' ? state.tool : 'select',
     toolAtoms: [],
     selection: [],
+    ...(calculationKind === 'single' ? {
+      trackingEnabled: false, trackingSourceOrbitalId: undefined,
+      trackingSourceGeometryIndex: undefined, trackingId: undefined,
+      trackingActive: undefined, trackingLoading: false, trackingError: undefined,
+    } : {}),
   })),
   setLastCalculationId: lastCalculationId => set(state => ({
     project: { ...state.project, lastCalculationId },
@@ -261,10 +279,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     const frame = reactionPath.displayFrames[0]
     return {
       calculationKind: 'reaction-path', reactionPath, reactionFrameIndex: 0,
+      selectedGeometryIndex: frame.leftImageIndex,
       reactionScfIterationIndex: 0,
       reactionProject: projectForReactionFrame(state.project, reactionPath.path, frame),
       reactionStatus: 'paused', reactionError: undefined,
       surfaces: [], selection: [], toolAtoms: [],
+      trackingEnabled: false, trackingSourceOrbitalId: undefined,
+      trackingSourceGeometryIndex: undefined, trackingId: undefined,
+      trackingActive: undefined, trackingLoading: false, trackingError: undefined,
     }
   }),
   failReactionPath: reactionError => set({ reactionStatus: 'error', reactionError }),
@@ -274,6 +296,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     const frame = state.reactionPath.displayFrames[bounded]
     return {
       reactionFrameIndex: bounded,
+      selectedGeometryIndex: frame.leftImageIndex,
       reactionScfIterationIndex: state.reactionPath.path.images[frame.leftImageIndex]?.scfIterations?.length ?? 0,
       reactionProject: projectForReactionFrame(state.project, state.reactionPath.path, frame, state.reactionProject?.bonds),
     }
@@ -289,15 +312,44 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     tool: playing && structureTools.has(state.tool) ? 'select' : state.tool,
     toolAtoms: playing ? [] : state.toolAtoms,
   })),
+  beginMoTracking: () => set(state => {
+    if (!state.selectedOrbital || !state.reactionPath) return {}
+    const frame = state.reactionPath.displayFrames[state.reactionFrameIndex]
+    if (!frame?.isCalculated) return { trackingError: '실제 ORCA geometry에서만 MO Tracking을 시작할 수 있습니다.' }
+    return {
+      trackingEnabled: true,
+      trackingSourceOrbitalId: state.selectedOrbital,
+      trackingSourceGeometryIndex: frame.leftImageIndex,
+      trackingId: undefined,
+      trackingActive: undefined,
+      trackingLoading: true,
+      trackingError: undefined,
+    }
+  }),
+  completeMoTracking: (trackingId, trackingActive) => set({
+    trackingId, trackingActive, trackingLoading: false, trackingError: undefined,
+  }),
+  failMoTracking: trackingError => set({
+    trackingLoading: false, trackingActive: false, trackingError,
+  }),
+  stopMoTracking: () => set(state => ({
+    trackingEnabled: false, trackingSourceOrbitalId: undefined,
+    trackingSourceGeometryIndex: undefined, trackingId: undefined,
+    trackingActive: undefined, trackingLoading: false, trackingError: undefined,
+    surfaces: state.surfaces.filter(layer => layer.key !== 'reaction-path-mo'),
+  })),
   copyReactionFrameToSingle: () => set(state => {
     if (!state.reactionProject) return { reactionCopyPrompt: false }
     const project = refreshPlanes({ ...state.reactionProject, name: `${state.project.name} · 경로 프레임 복사` })
     return {
       project, optimizedProject: undefined, viewStructure: 'initial', calculationKind: 'single',
       reactionStatus: 'idle', reactionPath: undefined, reactionProject: undefined,
-      reactionFrameIndex: 0, reactionScfIterationIndex: 0,
+      reactionFrameIndex: 0, selectedGeometryIndex: 0, reactionScfIterationIndex: 0,
       reactionCopyPrompt: false, reactionError: undefined,
       selection: [], toolAtoms: [], history: { past: [], future: [] }, surfaces: [], result: undefined,
+      trackingEnabled: false, trackingSourceOrbitalId: undefined,
+      trackingSourceGeometryIndex: undefined, trackingId: undefined,
+      trackingActive: undefined, trackingLoading: false, trackingError: undefined,
       notice: '현재 경로 프레임을 새 단일 구조로 복사했습니다.',
     }
   }),

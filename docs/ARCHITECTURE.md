@@ -22,6 +22,12 @@ React/Zustand ──REST/SSE── FastAPI ── JobManager(1 worker)
 - 최적화 job은 `optimization.out`/`optimization_trj.xyz`를 만든 뒤 실제 geometry마다 고유한
   `step-NNN.inp/out/gbw`를 둔다. manifest에는 원본 상대 경로와 fingerprint만 저장하며 MO cube는
   선택 시 지연 생성한다. schema 1 NEB/IRC importer와 typed NEB builder는 읽기·독립 호환 경계다.
+- `WavefunctionContext`가 single result와 실제 reaction geometry의 atoms/orbitals/energy/GBW를 같은
+  field pipeline에 연결한다. 보간 frame과 SCF iteration은 wavefunction context가 아니다.
+- 일반 geometry MO 선택과 MO Tracking은 별도 상태/API다. Tracking metadata 계산은 명시적 시작
+  뒤에만 수행하고, 보간 surface는 현재 frame 요청에 대해서만 생성한다.
+- `cache/cubes`, `cache/meshes`, `cache/tracking`은 재생성 가능한 파생 데이터다. bounded LRU/quota가
+  tracking mesh, 일반 mesh, Cube 순으로 회수하며 `step-NNN.gbw` 등 persistent artifact는 건드리지 않는다.
 
 ## 편집 규칙
 
