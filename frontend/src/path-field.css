@@ -1,0 +1,2 @@
+.path-field { display: grid; grid-template-columns: 1fr auto; gap: 5px; }
+.path-field button { border: 1px solid #315276; background: #17314a; color: #9ed1f3; border-radius: 5px; cursor: pointer; padding: 0 10px; font-size: 9px; }

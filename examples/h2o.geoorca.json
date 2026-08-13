@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "name": "H2O · 물",
+  "atoms": [
+    { "id": "10000000-0000-4000-8000-000000000001", "element": "O", "position": [0.0, 0.0, 0.0] },
+    { "id": "10000000-0000-4000-8000-000000000002", "element": "H", "position": [0.96, 0.0, 0.0] },
+    { "id": "10000000-0000-4000-8000-000000000003", "element": "H", "position": [-0.24, 0.93, 0.0] }
+  ],
+  "bonds": [
+    { "id": "20000000-0000-4000-8000-000000000001", "atomId1": "10000000-0000-4000-8000-000000000001", "atomId2": "10000000-0000-4000-8000-000000000002", "order": 1, "source": "inferred" },
+    { "id": "20000000-0000-4000-8000-000000000002", "atomId1": "10000000-0000-4000-8000-000000000001", "atomId2": "10000000-0000-4000-8000-000000000003", "order": 1, "source": "inferred" }
+  ],
+  "sketchPlanes": [],
+  "manualBondExclusions": [],
+  "totalCharge": 0,
+  "multiplicity": 1,
+  "calculationPreset": "preview",
+  "displaySettings": { "perspective": true, "showGrid": true, "showAxes": true, "atomScale": 1.0, "bondScale": 1.0 }
+}
+

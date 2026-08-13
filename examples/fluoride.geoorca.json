@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "name": "F− · 플루오라이드",
+  "atoms": [
+    { "id": "50000000-0000-4000-8000-000000000001", "element": "F", "position": [0.0, 0.0, 0.0] }
+  ],
+  "bonds": [],
+  "sketchPlanes": [],
+  "manualBondExclusions": [],
+  "totalCharge": -1,
+  "multiplicity": 1,
+  "calculationPreset": "preview",
+  "displaySettings": { "perspective": true, "showGrid": true, "showAxes": true, "atomScale": 1.0, "bondScale": 1.0 }
+}
+
