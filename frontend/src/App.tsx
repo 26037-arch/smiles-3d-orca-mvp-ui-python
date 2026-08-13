@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { AlertTriangle, X } from 'lucide-react'
 import { api } from './api/client'
 import { BottomPanel } from './components/BottomPanel'
+import { DEFAULT_BOTTOM_PANEL_HEIGHT } from './components/bottomPanelResize'
 import { RightPanel } from './components/RightPanel'
 import { ToolRail } from './components/ToolRail'
 import { TopBar } from './components/TopBar'
@@ -14,6 +16,7 @@ export default function App() {
   const [capabilities, setCapabilities] = useState<Capabilities>()
   const [job, setJob] = useState<any>()
   const [log, setLog] = useState('')
+  const [bottomPanelHeight, setBottomPanelHeight] = useState(DEFAULT_BOTTOM_PANEL_HEIGHT)
   const error = useProjectStore(s => s.error); const notice = useProjectStore(s => s.notice)
   const setError = useProjectStore(s => s.setError); const setNotice = useProjectStore(s => s.setNotice)
 
@@ -64,12 +67,12 @@ export default function App() {
   }
   const cancel = async () => { if (job?.id) { try { setJob(await api.cancel(job.id)) } catch (e) { setError((e as Error).message) } } }
 
-  return <main className="app-shell">
+  return <main className="app-shell" style={{ '--bottom': `${bottomPanelHeight}px` } as CSSProperties}>
     <TopBar capabilities={capabilities} job={job} onRun={run} onCancel={cancel} />
     <ToolRail />
     <section className="viewport-shell"><Viewport /></section>
     <RightPanel capabilities={capabilities} job={job} />
-    <BottomPanel job={job} log={log} />
+    <BottomPanel job={job} log={log} height={bottomPanelHeight} onHeightChange={setBottomPanelHeight} />
     {(error || notice) && <div className={`toast ${error ? 'error' : 'notice'}`} role="alert">
       {error && <AlertTriangle size={18} />}<span>{error ?? notice}</span>
       <button className="icon-button" onClick={() => { setError(); setNotice() }} aria-label="닫기"><X size={16} /></button>

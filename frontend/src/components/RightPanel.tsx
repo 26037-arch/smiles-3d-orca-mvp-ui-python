@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Activity, Atom as AtomIcon, CheckCircle2, ChevronDown, CircleAlert, Eye, EyeOff, FlaskConical, Layers3, Plus, RefreshCcw, Settings2, Trash2 } from 'lucide-react'
 import { api } from '../api/client'
 import { ELEMENTS, normalizeElement } from '../chem/elements'
-import { frontierOrbitals, orbitalOptionLabel, surfaceRequestForLayer, toggleSurfaceLayer } from '../chem/orbitals'
+import { frontierOrbitals, orbitalOptionLabel, selectedOrbitalIdForBrowser, surfaceRequestForLayer, toggleSurfaceLayer } from '../chem/orbitals'
 import { useProjectStore, visibleProject } from '../store/projectStore'
 import type { Capabilities, Orbital, SurfaceLayer, Vec3 } from '../types'
 
@@ -65,7 +65,9 @@ function SurfacesPanel() {
   const [extraOrbitalId, setExtraOrbitalId] = useState('')
   const frontier = useMemo(() => frontierOrbitals(result?.orbitals ?? [], result?.homo_internal_id), [result])
   const extraOrbital = result?.orbitals.find(orbital => orbital.internal_id === extraOrbitalId)
-  useEffect(() => setExtraOrbitalId(''), [result?.job_id])
+  useEffect(() => {
+    setExtraOrbitalId(selectedOrbitalIdForBrowser(result?.orbitals ?? [], selected))
+  }, [result?.job_id, result?.orbitals, selected])
   const addLayer = (orbital?: Orbital) => {
     if (orbital) setSelected(orbital.internal_id)
     if (!result) return setError('먼저 계산 결과가 필요합니다')

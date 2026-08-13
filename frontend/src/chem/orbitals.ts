@@ -19,6 +19,13 @@ export const frontierOrbitals = (orbitals: Orbital[], homoInternalId?: string) =
   )
 }
 
+export const selectedOrbitalIdForBrowser = (
+  orbitals: Orbital[],
+  selectedOrbitalId?: string,
+) => orbitals.some(orbital => orbital.internal_id === selectedOrbitalId)
+  ? selectedOrbitalId ?? ''
+  : ''
+
 const spinPrefix = (orbital: Orbital) => {
   if (orbital.spin === 'alpha') return 'α '
   if (orbital.spin === 'beta') return 'β '

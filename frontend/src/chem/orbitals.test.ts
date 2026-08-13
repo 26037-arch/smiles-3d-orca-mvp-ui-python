@@ -7,6 +7,7 @@ import {
   orbitalOptionLabel,
   orbitalSurfaceKey,
   orcaIndexToDisplayNumber,
+  selectedOrbitalIdForBrowser,
   surfaceRequestForLayer,
   toggleSurfaceLayer,
 } from './orbitals'
@@ -52,6 +53,13 @@ describe('orbital surface selection', () => {
 
     expect(orbitalOptionLabel(selected)).toContain('α MO 17 · HOMO')
     expect(orbitalOptionLabel(selected)).toContain('occ 0.0')
+  })
+
+  it('accepts an energy-diagram selection from the complete orbital list', () => {
+    const orbitals = Array.from({ length: 30 }, (_, index) => orbital(index))
+
+    expect(selectedOrbitalIdForBrowser(orbitals, 'restricted:24')).toBe('restricted:24')
+    expect(selectedOrbitalIdForBrowser(orbitals, 'restricted:99')).toBe('')
   })
 
   it.each<OrbitalSpin>(['restricted', 'alpha', 'beta'])(
