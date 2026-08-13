@@ -216,6 +216,51 @@ class SurfaceRecord(StrictModel):
     mesh_urls: dict[str, str]
 
 
+class BasisContribution(StrictModel):
+    basis_index: int
+    atom_index: int
+    atom_label: str
+    element: str
+    ao_label: str
+    shell_label: str
+    coefficient: float
+    loewdin_weight: float
+    percentage: float
+    phase: Literal["+", "-"]
+
+
+class AOContributionGroup(StrictModel):
+    key: str
+    atom_index: int
+    atom_label: str
+    element: str
+    ao_label: str
+    basis_indices: list[int]
+    count: int
+    percentage: float
+    representative_phase: Literal["+", "-"]
+
+
+class OrbitalComposition(StrictModel):
+    orbital_internal_id: str
+    energy_hartree: float
+    population_method: Literal["loewdin"] = "loewdin"
+    interpretation: str = "selected_mo_basis_component"
+    items: list[BasisContribution]
+    groups: list[AOContributionGroup]
+    offset: int
+    limit: int
+    total: int
+    has_more: bool
+    cache_hit: bool = False
+
+
+class BasisSurfaceRequest(StrictModel):
+    isovalue: Annotated[float, Field(gt=0)] = 0.03
+    opacity: Annotated[float, Field(ge=0, le=1)] = 0.55
+    display_mode: Literal["both", "positive", "negative"] = "both"
+
+
 class PlotField(StrictModel):
     field: Literal["mo", "total_density"]
     orbital_internal_id: str | None = None

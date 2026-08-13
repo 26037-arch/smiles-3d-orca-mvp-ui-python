@@ -12,6 +12,7 @@ from .jobs.manager import JobManager
 from .fields import CubeFieldService
 from .plots import PlotSamplingService
 from .surfaces.service import SurfaceService
+from .ao import AOAnalysisService
 
 
 @asynccontextmanager
@@ -24,6 +25,7 @@ async def lifespan(app: FastAPI):
     app.state.fields = CubeFieldService()
     app.state.surfaces = SurfaceService(app.state.jobs, app.state.fields)
     app.state.plots = PlotSamplingService(app.state.jobs, app.state.fields)
+    app.state.ao = AOAnalysisService(app.state.jobs, settings)
     yield
     app.state.jobs.executor.shutdown(wait=False, cancel_futures=True)
 

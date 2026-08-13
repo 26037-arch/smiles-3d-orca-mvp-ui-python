@@ -15,7 +15,13 @@ from ..chemistry.opi_adapter import ChemistryError
 from ..chemistry.presets import PRESETS
 from ..config import configure_orca_environment, load_settings, save_orca_path
 from ..jobs.manager import JobManager
-from ..models import JobCreate, MoleculeProject, PlotSampleRequest, SurfaceRequest
+from ..models import (
+    BasisSurfaceRequest,
+    JobCreate,
+    MoleculeProject,
+    PlotSampleRequest,
+    SurfaceRequest,
+)
 from ..plots import PlotSamplingService
 from ..surfaces.mesh import MESH_CACHE_VERSION
 from ..surfaces.service import SurfaceService
@@ -35,6 +41,10 @@ def surfaces(request: Request) -> SurfaceService:
 
 def plots(request: Request) -> PlotSamplingService:
     return request.app.state.plots
+
+
+def ao(request: Request):
+    return request.app.state.ao
 
 
 def error(status: int, code: str, detail: str) -> HTTPException:
@@ -130,6 +140,50 @@ def get_orbitals(job_id: UUID, request: Request):
         raise error(404, "JOB_NOT_FOUND", "작업을 찾을 수 없습니다") from exc
     except ChemistryError as exc:
         raise error(409, exc.code, exc.detail) from exc
+
+
+@router.get("/jobs/{job_id}/orbitals/{spin}/{orca_index}/composition")
+def get_orbital_composition(
+    job_id: UUID,
+    spin: str,
+    orca_index: int,
+    request: Request,
+    offset: int = 0,
+    limit: int = 5,
+):
+    if offset < 0 or limit < 1 or limit > 100:
+        raise error(422, "AO_INVALID_PAGE", "offset must be non-negative and limit must be 1..100.")
+    try:
+        return ao(request).composition(job_id, spin, orca_index, offset=offset, limit=limit)
+    except FileNotFoundError as exc:
+        raise error(404, "JOB_NOT_FOUND", str(exc)) from exc
+    except ChemistryError as exc:
+        status = 409 if exc.code in {"RESULT_NOT_READY", "AO_DEMO_UNAVAILABLE"} else 422
+        raise error(status, exc.code, exc.detail) from exc
+
+
+@router.post(
+    "/jobs/{job_id}/orbitals/{spin}/{orca_index}/basis/{basis_index}/surface"
+)
+def create_basis_surface(
+    job_id: UUID,
+    spin: str,
+    orca_index: int,
+    basis_index: int,
+    body: BasisSurfaceRequest,
+    request: Request,
+):
+    try:
+        return ao(request).create_surface(
+            job_id, spin, orca_index, basis_index, body
+        )
+    except FileNotFoundError as exc:
+        raise error(404, "JOB_NOT_FOUND", str(exc)) from exc
+    except ChemistryError as exc:
+        status = 409 if exc.code in {"RESULT_NOT_READY", "AO_DEMO_UNAVAILABLE"} else 422
+        raise error(status, exc.code, exc.detail) from exc
+    except (ValueError, RuntimeError) as exc:
+        raise error(422, "AO_SURFACE_GENERATION_FAILED", str(exc)) from exc
 
 
 @router.get("/jobs/{job_id}/events")

@@ -56,3 +56,22 @@ describe('core smoke flow', () => {
     expect(useProjectStore.getState().surfaces[0].visible).toBe(true)
   })
 })
+
+describe('AO mode surface lifecycle', () => {
+  it('keeps only the selected MO as a translucent reference and restores exact state', () => {
+    const first = { key: 'mo:restricted:1', name: 'MO 2', field: 'mo' as const, orbitalIndex: 1, orbitalInternalId: 'restricted:1', spin: 'restricted' as const, visible: false, opacity: .37, isovalue: .03, positiveColor: '#00f', negativeColor: '#f00', meshUrls: { positive: '/one' } }
+    const selected = { key: 'mo:restricted:2', name: 'MO 3', field: 'mo' as const, orbitalIndex: 2, orbitalInternalId: 'restricted:2', spin: 'restricted' as const, visible: true, opacity: .81, isovalue: .03, positiveColor: '#00f', negativeColor: '#f00', meshUrls: { positive: '/two' } }
+    const density = { key: 'total_density', name: 'density', field: 'total_density' as const, spin: 'restricted' as const, visible: false, opacity: .44, isovalue: .05, positiveColor: '#0f0', negativeColor: '#f00', meshUrls: {} }
+    useProjectStore.setState({ surfaces: [first, selected, density] })
+
+    useProjectStore.getState().enterAOMode(selected)
+    const during = useProjectStore.getState().surfaces
+    expect(during.find(layer => layer.key === first.key)?.visible).toBe(false)
+    expect(during.find(layer => layer.key === selected.key)).toMatchObject({ visible: true, opacity: .22 })
+    expect(during.find(layer => layer.key === density.key)).toMatchObject({ visible: false, opacity: .44 })
+    useProjectStore.getState().upsertSurface({ ...selected, key: 'ao:restricted:2:0', field: 'ao_component', basisIndex: 0 })
+
+    useProjectStore.getState().exitAOMode()
+    expect(useProjectStore.getState().surfaces).toEqual([first, selected, density])
+  })
+})

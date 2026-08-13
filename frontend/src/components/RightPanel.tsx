@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Activity, Atom as AtomIcon, CheckCircle2, ChevronDown, CircleAlert, Eye, EyeOff, FlaskConical, Layers3, Plus, RefreshCcw, Settings2, Trash2 } from 'lucide-react'
 import { api } from '../api/client'
 import { ELEMENTS, normalizeElement } from '../chem/elements'
-import { frontierOrbitals, orbitalOptionLabel, selectedOrbitalIdForBrowser, surfaceRequestForLayer, toggleSurfaceLayer } from '../chem/orbitals'
+import { createSurfaceLayer, frontierOrbitals, orbitalOptionLabel, selectedOrbitalIdForBrowser, surfaceRequestForLayer, toggleSurfaceLayer } from '../chem/orbitals'
+import { AO_PAGE_SIZE, appendCompositionItems, createBasisSurfaceLayer, initialBasisSelection, isCurrentAORequest } from '../chem/aoComposition'
 import { useProjectStore, visibleProject } from '../store/projectStore'
-import type { Capabilities, Orbital, SurfaceLayer, Vec3 } from '../types'
+import type { BasisContribution, Capabilities, Orbital, OrbitalComposition, SurfaceLayer, Vec3 } from '../types'
 
 function Section({ title, icon: Icon, children, open = true }: { title: string; icon: typeof Activity; children: React.ReactNode; open?: boolean }) {
   return <details className="panel-section" open={open}><summary><Icon /><span>{title}</span><ChevronDown className="chevron" /></summary><div className="section-content">{children}</div></details>
@@ -76,9 +77,215 @@ function SurfacesPanel() {
     if (update.layer) upsert(update.layer)
   }
   if (!result) return <p className="empty-state">계산 결과가 없으므로 표면을 만들 수 없습니다. ORCA가 없으면 명시적인 데모 결과로 UI를 시험할 수 있습니다.</p>
-  return <><button className="wide surface-add" onClick={() => addLayer()}><Layers3 /> 전체 전자 밀도 켜기/끄기</button><p className="help">MO의 ± 색은 확률 부호가 아니라 파동함수의 위상입니다. 전체 전자 밀도는 별도 scalar field입니다.</p><div className="mo-list-heading">Frontier orbitals</div><div className="orbital-chips">{frontier.map(o => <button key={o.internal_id} className={selected === o.internal_id ? 'active' : ''} onClick={() => addLayer(o)}>{o.spin === 'alpha' ? 'α ' : o.spin === 'beta' ? 'β ' : ''}{o.label ?? `MO ${o.display_number}`}<small>{(o.energy_hartree * 27.211386).toFixed(2)} eV</small></button>)}</div><div className="mo-browser"><strong>다른 MO 불러오기</strong><select aria-label="MO 선택" value={extraOrbitalId} onChange={event => { setExtraOrbitalId(event.target.value); setSelected(event.target.value || undefined) }}><option value="">MO 선택</option>{result.orbitals.map(orbital => <option key={orbital.internal_id} value={orbital.internal_id}>{orbitalOptionLabel(orbital)}</option>)}</select>{extraOrbital && <div className="mo-selection"><span>선택된 MO <b>{extraOrbital.spin === 'alpha' ? 'α ' : extraOrbital.spin === 'beta' ? 'β ' : ''}MO {extraOrbital.display_number}{extraOrbital.label ? ` · ${extraOrbital.label}` : ''}</b></span><span>에너지 <b>{(extraOrbital.energy_hartree * 27.211386245988).toFixed(2)} eV</b></span><span>점유수 <b>{extraOrbital.occupancy.toFixed(1)}</b></span><span>Spin <b>{extraOrbital.spin}</b></span></div>}<button className="wide" disabled={!extraOrbital} onClick={() => addLayer(extraOrbital)}><Plus /> 표면 추가</button></div>{layers.map(layer => <SurfaceControl key={layer.key} layer={layer} />)}</>
+  return <><button className="wide surface-add" onClick={() => addLayer()}><Layers3 /> 전체 전자 밀도 켜기/끄기</button><p className="help">MO의 ± 색은 확률 부호가 아니라 파동함수의 위상입니다. 전체 전자 밀도는 별도 scalar field입니다.</p><div className="mo-list-heading">Frontier orbitals</div><div className="orbital-chips">{frontier.map(o => <button key={o.internal_id} className={selected === o.internal_id ? 'active' : ''} onClick={() => addLayer(o)}>{o.spin === 'alpha' ? 'α ' : o.spin === 'beta' ? 'β ' : ''}{o.label ?? `MO ${o.display_number}`}<small>{(o.energy_hartree * 27.211386).toFixed(2)} eV</small></button>)}</div><div className="mo-browser"><strong>다른 MO 불러오기</strong><select aria-label="MO 선택" value={extraOrbitalId} onChange={event => { setExtraOrbitalId(event.target.value); setSelected(event.target.value || undefined) }}><option value="">MO 선택</option>{result.orbitals.map(orbital => <option key={orbital.internal_id} value={orbital.internal_id}>{orbitalOptionLabel(orbital)}</option>)}</select>{extraOrbital && <div className="mo-selection"><span>선택된 MO <b>{extraOrbital.spin === 'alpha' ? 'α ' : extraOrbital.spin === 'beta' ? 'β ' : ''}MO {extraOrbital.display_number}{extraOrbital.label ? ` · ${extraOrbital.label}` : ''}</b></span><span>에너지 <b>{(extraOrbital.energy_hartree * 27.211386245988).toFixed(2)} eV</b></span><span>점유수 <b>{extraOrbital.occupancy.toFixed(1)}</b></span><span>Spin <b>{extraOrbital.spin}</b></span></div>}<button className="wide" disabled={!extraOrbital} onClick={() => addLayer(extraOrbital)}><Plus /> 표면 추가</button></div>{layers.filter(layer => layer.field !== 'ao_component').map(layer => <SurfaceControl key={layer.key} layer={layer} />)}</>
+}
+
+function AOCompositionPanel({ capabilities }: { capabilities?: Capabilities }) {
+  const result = useProjectStore(state => state.result)
+  const selectedId = useProjectStore(state => state.selectedOrbital)
+  const layers = useProjectStore(state => state.surfaces)
+  const active = useProjectStore(state => state.aoMode)
+  const activeOrbitalId = useProjectStore(state => state.aoOrbitalId)
+  const enterMode = useProjectStore(state => state.enterAOMode)
+  const exitMode = useProjectStore(state => state.exitAOMode)
+  const upsert = useProjectStore(state => state.upsertSurface)
+  const setError = useProjectStore(state => state.setError)
+  const [composition, setComposition] = useState<OrbitalComposition>()
+  const [items, setItems] = useState<BasisContribution[]>([])
+  const [checked, setChecked] = useState<Set<number>>(new Set())
+  const [loading, setLoading] = useState(false)
+  const [localError, setLocalError] = useState<string>()
+  const generation = useRef(0)
+  const controller = useRef<AbortController | undefined>(undefined)
+  const selected = result?.orbitals.find(orbital => orbital.internal_id === selectedId)
+
+  const loadSurface = useCallback(async (
+    orbital: Orbital,
+    item: BasisContribution,
+    requestGeneration: number,
+    signal: AbortSignal,
+  ) => {
+    const layer = createBasisSurfaceLayer(orbital, item)
+    upsert({ ...layer, loading: true })
+    try {
+      const response = await api.basisSurface(
+        result!.job_id,
+        orbital.spin,
+        orbital.orca_index,
+        item.basis_index,
+        { isovalue: layer.isovalue, opacity: layer.opacity, display_mode: 'both' },
+        signal,
+      )
+      if (!isCurrentAORequest(generation.current, requestGeneration, signal.aborted)) return
+      upsert({
+        ...layer,
+        loading: false,
+        meshUrls: response.mesh_urls,
+        cacheHit: response.cache_hit,
+      })
+    } catch (error) {
+      if (!isCurrentAORequest(generation.current, requestGeneration, signal.aborted)) return
+      upsert({ ...layer, loading: false, error: (error as Error).message })
+    }
+  }, [result, upsert])
+
+  const activate = useCallback(async (orbital: Orbital) => {
+    if (!result) return
+    if (result.demo) {
+      setError('실제 ORCA 계산에서만 AO 성분을 분석할 수 있습니다.')
+      return
+    }
+    const requestGeneration = generation.current + 1
+    generation.current = requestGeneration
+    controller.current?.abort()
+    const nextController = new AbortController()
+    controller.current = nextController
+    setLoading(true)
+    setLocalError(undefined)
+    setComposition(undefined)
+    setItems([])
+    setChecked(new Set())
+    const reference = {
+      ...createSurfaceLayer(orbital),
+      orbitalInternalId: orbital.internal_id,
+    }
+    enterMode(reference)
+    try {
+      const page = await api.composition(
+        result.job_id,
+        orbital.spin,
+        orbital.orca_index,
+        0,
+        AO_PAGE_SIZE,
+        nextController.signal,
+      )
+      if (!isCurrentAORequest(generation.current, requestGeneration, nextController.signal.aborted)) return
+      setComposition(page)
+      setItems(page.items)
+      setChecked(initialBasisSelection(page.items))
+      await Promise.all(page.items.map(item => (
+        loadSurface(orbital, item, requestGeneration, nextController.signal)
+      )))
+    } catch (error) {
+      if (!nextController.signal.aborted && generation.current === requestGeneration) {
+        setLocalError((error as Error).message)
+      }
+    } finally {
+      if (generation.current === requestGeneration) setLoading(false)
+    }
+  }, [enterMode, loadSurface, result, setError])
+
+  const deactivate = useCallback(() => {
+    generation.current += 1
+    controller.current?.abort()
+    controller.current = undefined
+    setComposition(undefined)
+    setItems([])
+    setChecked(new Set())
+    setLoading(false)
+    setLocalError(undefined)
+    exitMode()
+  }, [exitMode])
+
+  useEffect(() => {
+    if (active && selected && activeOrbitalId !== selected.internal_id) void activate(selected)
+  }, [active, activeOrbitalId, activate, selected])
+
+  useEffect(() => () => {
+    generation.current += 1
+    controller.current?.abort()
+    useProjectStore.getState().exitAOMode()
+  }, [])
+
+  const loadMore = async () => {
+    if (!result || !selected || !composition?.has_more || loading) return
+    const requestGeneration = generation.current
+    setLoading(true)
+    try {
+      const page = await api.composition(
+        result.job_id,
+        selected.spin,
+        selected.orca_index,
+        items.length,
+        AO_PAGE_SIZE,
+        controller.current?.signal,
+      )
+      if (generation.current !== requestGeneration) return
+      setItems(current => appendCompositionItems(current, page.items))
+      setComposition(page)
+    } catch (error) {
+      if (generation.current === requestGeneration) setLocalError((error as Error).message)
+    } finally {
+      if (generation.current === requestGeneration) setLoading(false)
+    }
+  }
+
+  const toggleBasis = (item: BasisContribution) => {
+    if (!selected || !controller.current) return
+    const isChecked = checked.has(item.basis_index)
+    setChecked(current => {
+      const next = new Set(current)
+      if (isChecked) next.delete(item.basis_index)
+      else next.add(item.basis_index)
+      return next
+    })
+    const key = createBasisSurfaceLayer(selected, item).key
+    const existing = layers.find(layer => layer.key === key)
+    if (isChecked) {
+      if (existing) upsert({ ...existing, visible: false })
+      return
+    }
+    if (existing?.meshUrls && Object.keys(existing.meshUrls).length) {
+      upsert({ ...existing, visible: true })
+      return
+    }
+    void loadSurface(selected, item, generation.current, controller.current.signal)
+  }
+
+  if (!result || !selected) {
+    return <p className="empty-state">에너지 도표나 MO 목록에서 오비탈을 선택하세요.</p>
+  }
+  return <div className="ao-composition">
+    <button
+      className={`wide ao-toggle ${active ? 'active' : ''}`}
+      disabled={loading || (active && activeOrbitalId !== selected.internal_id)}
+      onClick={() => active ? deactivate() : void activate(selected)}
+    >
+      {active && <CheckCircle2 />}
+      {loading ? 'AO 성분 분석 중…' : 'AO 성분 표시'}
+    </button>
+    <p className="help ao-warning">선택 MO의 기저함수 성분 Cμ φμ입니다. 전자밀도나 독립적으로 점유된 원자 오비탈이 아닙니다.</p>
+    {!capabilities?.aoComposition.available && !result.demo && (
+      <p className="inline-error">{capabilities?.aoComposition.reasons.join(' · ')}</p>
+    )}
+    {active && localError && <p className="inline-error">{localError}</p>}
+    {active && !loading && composition && !items.length && <p className="empty-state">표시할 AO 성분이 없습니다.</p>}
+    {active && composition && <>
+      <div className="ao-summary-heading"><b>Löwdin AO 요약</b><span>합계 100%</span></div>
+      <div className="ao-groups">
+        {composition.groups.map(group => <details key={group.key}>
+          <summary><span>{group.atom_label}</span><span>{group.ao_label}</span><small>{group.count}개</small><b>{group.percentage.toFixed(1)}%</b><i>{group.representative_phase}</i></summary>
+          {items.filter(item => group.basis_indices.includes(item.basis_index)).map(item => <div key={item.basis_index} className="ao-detail"><span>{item.shell_label}</span><code>{item.coefficient >= 0 ? '+' : ''}{item.coefficient.toFixed(3)}</code><b>{item.percentage.toFixed(1)}%</b><i>{item.phase}</i></div>)}
+        </details>)}
+      </div>
+      <div className="ao-ranked-heading">기저함수 기여 순위</div>
+      <div className="ao-ranked-list">
+        {items.map(item => {
+          const layer = layers.find(candidate => candidate.key === createBasisSurfaceLayer(selected, item).key)
+          return <label key={item.basis_index}>
+            <input type="checkbox" checked={checked.has(item.basis_index)} onChange={() => toggleBasis(item)} />
+            <span><b>{item.atom_label} · {item.shell_label}</b><small>Cμ {item.coefficient >= 0 ? '+' : ''}{item.coefficient.toFixed(3)} · Löwdin {item.percentage.toFixed(1)}%</small></span>
+            <i>{item.phase}</i>
+            {layer?.loading && <em>생성 중</em>}
+            {layer?.error && <em className="bad">오류</em>}
+          </label>
+        })}
+      </div>
+      {composition.has_more && <button className="wide" disabled={loading} onClick={() => void loadMore()}>5개 더 보기</button>}
+    </>}
+  </div>
 }
 
 export function RightPanel({ capabilities, job }: { capabilities?: Capabilities; job?: any }) {
-  return <aside className="right-panel"><div className="panel-title"><div><strong>속성</strong><small>분자 프로젝트</small></div><Settings2 /></div><Section title="원자 추가" icon={Plus}><CoordinateInput /></Section><Section title="선택 항목" icon={AtomIcon}><SelectedAtomPanel /></Section><Section title="계산 설정" icon={FlaskConical}><CalculationSettings capabilities={capabilities} /></Section><Section title="결합과 평면" icon={Layers3} open={false}><BondsAndPlanes /></Section><Section title="전자 밀도 · MO" icon={Activity}><SurfacesPanel /></Section>{job?.error_detail && <div className="diagnostic-error"><CircleAlert />{job.error_code}: {job.error_detail}</div>}</aside>
+  return <aside className="right-panel"><div className="panel-title"><div><strong>속성</strong><small>분자 프로젝트</small></div><Settings2 /></div><Section title="원자 추가" icon={Plus}><CoordinateInput /></Section><Section title="선택 항목" icon={AtomIcon}><SelectedAtomPanel /></Section><Section title="계산 설정" icon={FlaskConical}><CalculationSettings capabilities={capabilities} /></Section><Section title="결합과 평면" icon={Layers3} open={false}><BondsAndPlanes /></Section><Section title="전자 밀도 · MO" icon={Activity}><SurfacesPanel /></Section><Section title="AO 성분" icon={AtomIcon}><AOCompositionPanel capabilities={capabilities} /></Section>{job?.error_detail && <div className="diagnostic-error"><CircleAlert />{job.error_code}: {job.error_detail}</div>}</aside>
 }

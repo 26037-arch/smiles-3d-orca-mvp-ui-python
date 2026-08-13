@@ -23,6 +23,16 @@ def _binary(configured: str | None, name: str) -> str | None:
     return shutil.which(name)
 
 
+def orca_tool(settings: LocalSettings, name: str) -> str | None:
+    """Resolve an ORCA companion executable next to configured ORCA, then PATH."""
+    configured = None
+    if settings.orca_path:
+        orca = Path(settings.orca_path).expanduser()
+        executable = f"{name}.exe" if os.name == "nt" else name
+        configured = str(orca.with_name(executable))
+    return _binary(configured, name)
+
+
 def _version(path: str | None) -> tuple[str | None, bool, str | None]:
     if not path:
         return None, False, "ORCA 실행 파일을 찾지 못했습니다"
@@ -53,7 +63,8 @@ def capabilities(settings: LocalSettings) -> dict[str, object]:
             opi_version = "installed (version unknown)" if opi_present else None
     orca_path = _binary(settings.orca_path, "orca")
     version, compatible, version_error = _version(orca_path)
-    orca_plot = _binary(str(Path(orca_path).with_name("orca_plot.exe")) if orca_path and os.name == "nt" else None, "orca_plot")
+    orca_plot = orca_tool(settings, "orca_plot")
+    orca_2json = orca_tool(settings, "orca_2json")
     jobs = Path(settings.jobs_dir).resolve()
     try:
         jobs.mkdir(parents=True, exist_ok=True)
@@ -75,6 +86,18 @@ def capabilities(settings: LocalSettings) -> dict[str, object]:
         "opi": {"available": opi_present, "version": opi_version},
         "orca": {"available": bool(orca_path), "path": orca_path, "version": version, "compatible": compatible},
         "orcaPlot": {"available": bool(orca_plot), "path": orca_plot},
+        "orca2Json": {"available": bool(orca_2json), "path": orca_2json},
+        "aoComposition": {
+            "available": bool(orca_2json) and bool(orca_plot),
+            "reasons": [
+                message
+                for available, message in (
+                    (bool(orca_2json), "orca_2json could not be found."),
+                    (bool(orca_plot), "orca_plot could not be found."),
+                )
+                if not available
+            ],
+        },
         "jobs": {"writable": writable, "path": str(jobs)},
         "calculation": {"available": opi_present and compatible and writable, "reasons": reasons},
         "demo": {"available": settings.demo_calculations, "label": "모의 데이터—실제 양자화학 계산이 아님"},

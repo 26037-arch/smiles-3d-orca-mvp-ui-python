@@ -1,0 +1,43 @@
+{
+  "Molecule": {
+    "Atoms": [
+      {
+        "Basis": [{"Coefficients": [1.0], "Exponents": [1.0], "Shell": "s"}],
+        "Coords": [0.0, 0.0, 0.0],
+        "ElementLabel": "H",
+        "ElementNumber": 1,
+        "Idx": 0,
+        "NuclearCharge": 1.0
+      },
+      {
+        "Basis": [{"Coefficients": [1.0], "Exponents": [1.0], "Shell": "s"}],
+        "Coords": [0.0, 0.0, 0.8],
+        "ElementLabel": "H",
+        "ElementNumber": 1,
+        "Idx": 1,
+        "NuclearCharge": 1.0
+      }
+    ],
+    "BaseName": "electronic",
+    "Charge": 0,
+    "CoordinateUnits": "Angs",
+    "HFTyp": "RHF",
+    "MolecularOrbitals": {
+      "EnergyUnit": "Eh",
+      "MOs": [
+        {
+          "MOCoefficients": [-0.8, -0.6],
+          "Occupancy": 2.0,
+          "OrbitalEnergy": -0.5
+        },
+        {
+          "MOCoefficients": [-0.6, 0.8],
+          "Occupancy": 0.0,
+          "OrbitalEnergy": 0.25
+        }
+      ]
+    },
+    "Multiplicity": 1,
+    "S-Matrix": [[1.0, 0.0], [0.0, 1.0]]
+  }
+}

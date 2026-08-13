@@ -78,8 +78,10 @@ export interface CalculationResult {
 export interface SurfaceLayer {
   key: string
   name: string
-  field: 'total_density' | 'mo'
+  field: 'total_density' | 'mo' | 'ao_component'
   orbitalIndex?: number
+  orbitalInternalId?: string
+  basisIndex?: number
   spin: OrbitalSpin
   visible: boolean
   opacity: number
@@ -98,7 +100,48 @@ export interface Capabilities {
   opi: { available: boolean; version?: string }
   orca: { available: boolean; path?: string; version?: string; compatible: boolean }
   orcaPlot: { available: boolean; path?: string }
+  orca2Json: { available: boolean; path?: string }
+  aoComposition: { available: boolean; reasons: string[] }
   jobs: { writable: boolean; path: string }
+}
+
+export interface BasisContribution {
+  basis_index: number
+  atom_index: number
+  atom_label: string
+  element: string
+  ao_label: string
+  shell_label: string
+  coefficient: number
+  loewdin_weight: number
+  percentage: number
+  phase: '+' | '-'
+}
+
+export interface AOContributionGroup {
+  key: string
+  atom_index: number
+  atom_label: string
+  element: string
+  ao_label: string
+  basis_indices: number[]
+  count: number
+  percentage: number
+  representative_phase: '+' | '-'
+}
+
+export interface OrbitalComposition {
+  orbital_internal_id: string
+  energy_hartree: number
+  population_method: 'loewdin'
+  interpretation: 'selected_mo_basis_component'
+  items: BasisContribution[]
+  groups: AOContributionGroup[]
+  offset: number
+  limit: number
+  total: number
+  has_more: boolean
+  cache_hit: boolean
 }
 
 export type PlotFieldMode = 'mo' | 'total_density'

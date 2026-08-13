@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { inferBonds } from '../chem/bonds'
 import { changeAngle, changeDistance, threeAtomPlane } from '../chem/geometry'
+import { AO_REFERENCE_OPACITY } from '../chem/aoComposition'
 import type { Atom, Bond, CalculationResult, MoleculeProject, SketchPlane, SurfaceLayer, Tool, Vec3 } from '../types'
 
 const plane = (kind: 'XY' | 'YZ' | 'ZX', origin: Vec3, normal: Vec3, basisU: Vec3, basisV: Vec3): SketchPlane => ({
@@ -36,6 +37,9 @@ export interface ProjectStore {
   surfaces: SurfaceLayer[]
   selectedOrbital?: string
   orbitEnabled: boolean
+  aoMode: boolean
+  aoOrbitalId?: string
+  aoSurfaceSnapshot?: SurfaceLayer[]
   setTool(tool: Tool): void
   setAddElement(element: string): void
   selectAtom(id: string, additive?: boolean): void
@@ -67,6 +71,8 @@ export interface ProjectStore {
   setNotice(value?: string): void
   setError(value?: string): void
   setOrbitEnabled(value: boolean): void
+  enterAOMode(reference: SurfaceLayer): void
+  exitAOMode(): void
 }
 
 function refreshPlanes(project: MoleculeProject): MoleculeProject {
@@ -88,7 +94,7 @@ const withCommand = (state: ProjectStore, project: MoleculeProject) => ({
 
 export const useProjectStore = create<ProjectStore>((set, get) => ({
   project: newProject(), viewStructure: 'initial', selection: [], tool: 'select', addElement: 'C', toolAtoms: [],
-  history: { past: [], future: [] }, surfaces: [], orbitEnabled: true,
+  history: { past: [], future: [] }, surfaces: [], orbitEnabled: true, aoMode: false,
   setTool: tool => set({ tool, toolAtoms: [], error: undefined }),
   setAddElement: addElement => set({ addElement }),
   selectAtom: (id, additive = false) => {
@@ -164,15 +170,34 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   togglePlane: id => { const state = get(); set(withCommand(state, { ...state.project, sketchPlanes: state.project.sketchPlanes.map(p => p.id === id ? { ...p, visible: !p.visible } : p) })) },
   applyDistance: (ids, target) => { const state = get(); try { set(withCommand(state, { ...state.project, atoms: changeDistance(state.project.atoms, state.project.bonds, ...ids, target) })) } catch (e) { set({ error: (e as Error).message }) } },
   applyAngle: (ids, target, camera) => { const state = get(); try { set(withCommand(state, { ...state.project, atoms: changeAngle(state.project.atoms, state.project.bonds, ...ids, target, camera) })) } catch (e) { set({ error: (e as Error).message }) } },
-  setProject: project => set({ project: refreshPlanes(project), optimizedProject: undefined, viewStructure: 'initial', selection: [], history: { past: [], future: [] }, result: undefined, surfaces: [], error: undefined }),
+  setProject: project => set({ project: refreshPlanes(project), optimizedProject: undefined, viewStructure: 'initial', selection: [], history: { past: [], future: [] }, result: undefined, surfaces: [], aoMode: false, aoOrbitalId: undefined, aoSurfaceSnapshot: undefined, error: undefined }),
   updateProject: patch => { const state = get(); set(withCommand(state, { ...state.project, ...patch })) },
   undo: () => { const state = get(); const previous = state.history.past.at(-1); if (previous) set({ project: previous, history: { past: state.history.past.slice(0, -1), future: [state.project, ...state.history.future] }, selection: [] }) },
   redo: () => { const state = get(); const next = state.history.future[0]; if (next) set({ project: next, history: { past: [...state.history.past, state.project], future: state.history.future.slice(1) }, selection: [] }) },
-  applyResult: result => { const state = get(); set({ result, optimizedProject: { ...state.project, atoms: result.optimized_atoms, lastCalculationId: result.job_id }, viewStructure: 'optimized', surfaces: [] }) },
+  applyResult: result => { const state = get(); set({ result, optimizedProject: { ...state.project, atoms: result.optimized_atoms, lastCalculationId: result.job_id }, viewStructure: 'optimized', surfaces: [], aoMode: false, aoOrbitalId: undefined, aoSurfaceSnapshot: undefined }) },
   setViewStructure: viewStructure => set({ viewStructure }), setResult: result => set({ result }),
   upsertSurface: layer => set(state => ({ surfaces: [...state.surfaces.filter(x => x.key !== layer.key), layer] })),
   removeSurface: key => set(state => ({ surfaces: state.surfaces.filter(x => x.key !== key) })),
   setSelectedOrbital: selectedOrbital => set({ selectedOrbital }), setNotice: notice => set({ notice }), setError: error => set({ error }), setOrbitEnabled: orbitEnabled => set({ orbitEnabled }),
+  enterAOMode: reference => set(state => {
+    const snapshot = state.aoSurfaceSnapshot ?? state.surfaces.map(layer => ({ ...layer, meshUrls: { ...layer.meshUrls } }))
+    const base = snapshot.map(layer => ({ ...layer, meshUrls: { ...layer.meshUrls } }))
+    const referenceIndex = base.findIndex(layer => layer.key === reference.key)
+    if (referenceIndex < 0) base.push(reference)
+    const surfaces = base.map(layer => {
+      if (layer.field !== 'mo') return layer
+      return layer.key === reference.key
+        ? { ...layer, visible: true, opacity: AO_REFERENCE_OPACITY }
+        : { ...layer, visible: false }
+    })
+    return { aoMode: true, aoOrbitalId: reference.orbitalInternalId, aoSurfaceSnapshot: snapshot, surfaces }
+  }),
+  exitAOMode: () => set(state => ({
+    surfaces: (state.aoSurfaceSnapshot ?? state.surfaces.filter(layer => layer.field !== 'ao_component')).map(layer => ({ ...layer, meshUrls: { ...layer.meshUrls } })),
+    aoMode: false,
+    aoOrbitalId: undefined,
+    aoSurfaceSnapshot: undefined,
+  })),
 }))
 
 export const visibleProject = (state: ProjectStore) => state.viewStructure === 'optimized' && state.optimizedProject ? state.optimizedProject : state.project

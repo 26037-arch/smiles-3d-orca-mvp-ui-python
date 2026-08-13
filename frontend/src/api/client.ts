@@ -1,4 +1,4 @@
-import type { CalculationResult, Capabilities, MoleculeProject, PlotSample, PlotSampleRequest } from '../types'
+import type { CalculationResult, Capabilities, MoleculeProject, OrbitalComposition, OrbitalSpin, PlotSample, PlotSampleRequest } from '../types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, { ...init, cache: 'no-store', headers: { 'Content-Type': 'application/json', ...init?.headers } })
@@ -23,5 +23,7 @@ export const api = {
   result: (id: string) => request<CalculationResult>(`/api/jobs/${id}/result`),
   cancel: (id: string) => request<any>(`/api/jobs/${id}/cancel`, { method: 'POST' }),
   surface: (id: string, body: any) => request<any>(`/api/jobs/${id}/surfaces`, { method: 'POST', body: JSON.stringify(body) }),
+  composition: (id: string, spin: OrbitalSpin, orcaIndex: number, offset = 0, limit = 5, signal?: AbortSignal) => request<OrbitalComposition>(`/api/jobs/${id}/orbitals/${spin}/${orcaIndex}/composition?offset=${offset}&limit=${limit}`, { signal }),
+  basisSurface: (id: string, spin: OrbitalSpin, orcaIndex: number, basisIndex: number, body: any, signal?: AbortSignal) => request<any>(`/api/jobs/${id}/orbitals/${spin}/${orcaIndex}/basis/${basisIndex}/surface`, { method: 'POST', body: JSON.stringify(body), signal }),
   samplePlot: (id: string, body: PlotSampleRequest) => request<PlotSample>(`/api/jobs/${id}/plots/sample`, { method: 'POST', body: JSON.stringify(body) }),
 }
