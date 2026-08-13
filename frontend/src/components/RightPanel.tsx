@@ -39,8 +39,9 @@ function CalculationSettings({ capabilities }: { capabilities?: Capabilities }) 
   const parityOk = electrons % 2 === (project.multiplicity - 1) % 2
   const savePath = async () => { try { await api.setOrcaPath(orcaPath.trim() || null); setNotice('ORCA 경로를 로컬 설정에 저장했습니다.'); window.setTimeout(() => window.location.reload(), 400) } catch (e) { setError((e as Error).message) } }
   useEffect(() => () => pathRequest.current?.abort(), [])
-  const loadReactionPath = async () => {
-    const jobId = result?.job_id ?? project.lastCalculationId
+  const reactionJobId = result?.job_id ?? project.lastCalculationId
+  const loadReactionPath = useCallback(async () => {
+    const jobId = reactionJobId
     if (!jobId) return setError('반응 경로를 읽을 계산 작업이 없습니다.')
     pathRequest.current?.abort()
     const controller = new AbortController(); pathRequest.current = controller
@@ -53,7 +54,12 @@ function CalculationSettings({ capabilities }: { capabilities?: Capabilities }) 
       if (controller.signal.aborted) return
       useProjectStore.getState().failReactionPath((error as Error).message)
     }
-  }
+  }, [reactionJobId, setError])
+  useEffect(() => {
+    if (calculationKind === 'reaction-path' && reactionJobId && reactionStatus === 'idle') {
+      void loadReactionPath()
+    }
+  }, [calculationKind, loadReactionPath, reactionJobId, reactionStatus])
   return <div className="settings-grid">
     <label className="full">계산 종류<div className="calculation-kind" role="group" aria-label="계산 종류">
       <button className={calculationKind === 'single' ? 'active' : ''} onClick={() => { pathRequest.current?.abort(); setCalculationKind('single') }}>단일 구조</button>
@@ -63,8 +69,8 @@ function CalculationSettings({ capabilities }: { capabilities?: Capabilities }) 
     <label>스핀 다중도<input type="number" min="1" max="20" value={project.multiplicity} onChange={e => update({ multiplicity: Number(e.target.value) })} /></label>
     <label className="full">계산 프리셋<select value={project.calculationPreset} onChange={e => update({ calculationPreset: e.target.value })}>{presets.map(p => <option key={p.id} value={p.id}>{p.name} · 비용 {p.cost}</option>)}</select></label>
     {calculationKind === 'reaction-path' && <div className="reaction-import full">
-      <button className="wide" disabled={reactionStatus === 'loading-path'} onClick={() => void loadReactionPath()}>{reactionStatus === 'loading-path' ? '경로 불러오는 중…' : '현재 작업의 reaction-path.json 불러오기'}</button>
-      <p className="help">NEB·IRC를 실행하지 않고 작업 디렉터리의 기존 결과만 읽습니다.</p>
+      <button className="wide" disabled={reactionStatus === 'loading-path'} onClick={() => void loadReactionPath()}>{reactionStatus === 'loading-path' ? '경로 찾는 중…' : '현재 작업에서 반응 경로 찾기'}</button>
+      <p className="help">작업 폴더의 *_MEP_trj.xyz 또는 *_IRC_Full_trj.xyz를 자동 감지합니다. JSON 파일을 직접 선택할 필요가 없습니다.</p>
       {reactionError && <p className="inline-error">{reactionError}</p>}
     </div>}
     <div className={`validation-line full ${parityOk ? 'ok' : 'bad'}`}>{parityOk ? <CheckCircle2 /> : <CircleAlert />}전자 수 {electrons} · {parityOk ? '다중도 parity 일치' : '전하·다중도 parity 불일치'}</div>
@@ -106,6 +112,8 @@ function SurfaceControl({ layer }: { layer: SurfaceLayer }) {
 function SurfacesPanel() {
   const result = useProjectStore(s => s.result); const layers = useProjectStore(s => s.surfaces); const upsert = useProjectStore(s => s.upsertSurface); const selected = useProjectStore(s => s.selectedOrbital); const setSelected = useProjectStore(s => s.setSelectedOrbital); const setError = useProjectStore(s => s.setError)
   const calculationKind = useProjectStore(s => s.calculationKind)
+  const reactionPath = useProjectStore(s => s.reactionPath)
+  const reactionHasWavefunctions = reactionPath?.path.images.every(image => Object.keys(image.orbitalRefs).length > 0) ?? false
   const [extraOrbitalId, setExtraOrbitalId] = useState('')
   const frontier = useMemo(() => frontierOrbitals(result?.orbitals ?? [], result?.homo_internal_id), [result])
   const extraOrbital = result?.orbitals.find(orbital => orbital.internal_id === extraOrbitalId)
@@ -121,7 +129,8 @@ function SurfacesPanel() {
     if (update.layer) upsert(update.layer)
   }
   if (!result) return <p className="empty-state">계산 결과가 없으므로 표면을 만들 수 없습니다. ORCA가 없으면 명시적인 데모 결과로 UI를 시험할 수 있습니다.</p>
-  return <><button className="wide surface-add" onClick={() => addLayer()}><Layers3 /> 전체 전자 밀도 켜기/끄기</button><p className="help">MO의 ± 색은 확률 부호가 아니라 파동함수의 위상입니다. 전체 전자 밀도는 별도 scalar field입니다.</p><div className="mo-list-heading">Frontier orbitals</div><div className="orbital-chips">{frontier.map(o => <button key={o.internal_id} className={selected === o.internal_id ? 'active' : ''} onClick={() => addLayer(o)}>{o.spin === 'alpha' ? 'α ' : o.spin === 'beta' ? 'β ' : ''}{o.label ?? `MO ${o.display_number}`}<small>{(o.energy_hartree * 27.211386).toFixed(2)} eV</small></button>)}</div><div className="mo-browser"><strong>다른 MO 불러오기</strong><select aria-label="MO 선택" value={extraOrbitalId} onChange={event => { setExtraOrbitalId(event.target.value); setSelected(event.target.value || undefined) }}><option value="">MO 선택</option>{result.orbitals.map(orbital => <option key={orbital.internal_id} value={orbital.internal_id}>{orbitalOptionLabel(orbital)}</option>)}</select>{extraOrbital && <div className="mo-selection"><span>선택된 MO <b>{extraOrbital.spin === 'alpha' ? 'α ' : extraOrbital.spin === 'beta' ? 'β ' : ''}MO {extraOrbital.display_number}{extraOrbital.label ? ` · ${extraOrbital.label}` : ''}</b></span><span>에너지 <b>{(extraOrbital.energy_hartree * 27.211386245988).toFixed(2)} eV</b></span><span>점유수 <b>{extraOrbital.occupancy.toFixed(1)}</b></span><span>Spin <b>{extraOrbital.spin}</b></span></div>}<button className="wide" disabled={!extraOrbital} onClick={() => addLayer(extraOrbital)}><Plus /> 표면 추가</button></div>{layers.filter(layer => layer.field !== 'ao_component').map(layer => <SurfaceControl key={layer.key} layer={layer} />)}</>
+  const reactionMoDisabled = calculationKind === 'reaction-path' && !reactionHasWavefunctions
+  return <><button className="wide surface-add" onClick={() => addLayer()}><Layers3 /> 전체 전자 밀도 켜기/끄기</button><p className="help">MO의 ± 색은 확률 부호가 아니라 파동함수의 위상입니다. 전체 전자 밀도는 별도 scalar field입니다.</p>{reactionMoDisabled && <p className="inline-error">이 반응 경로에는 이미지별 파동함수 결과가 없습니다. 분자 구조 경로만 재생할 수 있습니다.</p>}<div className="mo-list-heading">Frontier orbitals</div><div className="orbital-chips">{frontier.map(o => <button key={o.internal_id} disabled={reactionMoDisabled} className={selected === o.internal_id ? 'active' : ''} onClick={() => addLayer(o)}>{o.spin === 'alpha' ? 'α ' : o.spin === 'beta' ? 'β ' : ''}{o.label ?? `MO ${o.display_number}`}<small>{(o.energy_hartree * 27.211386).toFixed(2)} eV</small></button>)}</div><div className="mo-browser"><strong>다른 MO 불러오기</strong><select aria-label="MO 선택" disabled={reactionMoDisabled} value={extraOrbitalId} onChange={event => { setExtraOrbitalId(event.target.value); setSelected(event.target.value || undefined) }}><option value="">MO 선택</option>{result.orbitals.map(orbital => <option key={orbital.internal_id} value={orbital.internal_id}>{orbitalOptionLabel(orbital)}</option>)}</select>{extraOrbital && <div className="mo-selection"><span>선택된 MO <b>{extraOrbital.spin === 'alpha' ? 'α ' : extraOrbital.spin === 'beta' ? 'β ' : ''}MO {extraOrbital.display_number}{extraOrbital.label ? ` · ${extraOrbital.label}` : ''}</b></span><span>에너지 <b>{(extraOrbital.energy_hartree * 27.211386245988).toFixed(2)} eV</b></span><span>점유수 <b>{extraOrbital.occupancy.toFixed(1)}</b></span><span>Spin <b>{extraOrbital.spin}</b></span></div>}<button className="wide" disabled={!extraOrbital || reactionMoDisabled} onClick={() => addLayer(extraOrbital)}><Plus /> 표면 추가</button></div>{layers.filter(layer => layer.field !== 'ao_component').map(layer => <SurfaceControl key={layer.key} layer={layer} />)}</>
 }
 
 function AOCompositionPanel({ capabilities }: { capabilities?: Capabilities }) {

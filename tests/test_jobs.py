@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from backend.app.config import LocalSettings
 from backend.app.jobs.manager import JobManager, now
-from backend.app.models import JobMode, JobRecord, JobState
+from backend.app.models import CalculationResult, JobMode, JobRecord, JobState
 
 
 def wait_terminal(manager: JobManager, job_id, timeout=3):
@@ -95,4 +95,40 @@ def test_uuid_job_paths_cannot_traverse(tmp_path):
     manager = JobManager(LocalSettings(jobs_dir=str(tmp_path)))
     path = manager._job_dir(uuid4())
     assert path.parent == tmp_path.resolve()
+    manager.executor.shutdown()
+
+
+def test_successful_job_runs_reaction_path_completion_hook(
+    tmp_path, water_project, monkeypatch
+):
+    manager = JobManager(LocalSettings(jobs_dir=str(tmp_path), orca_path="orca"))
+
+    def create_neb_result(_adapter, project, job_dir, job_id, **_kwargs):
+        atoms = "\n".join(
+            f"{atom.element} {atom.position[0]} {atom.position[1]} {atom.position[2]}"
+            for atom in project.atoms
+        )
+        moved = "\n".join(
+            f"{atom.element} {atom.position[0] + 0.1} {atom.position[1]} {atom.position[2]}"
+            for atom in project.atoms
+        )
+        (job_dir / "reaction_MEP_trj.xyz").write_text(
+            f"3\nEnergy = -10.0 Eh\n{atoms}\n3\nEnergy = -9.9 Eh\n{moved}\n",
+            encoding="utf-8",
+        )
+        return CalculationResult(
+            job_id=job_id,
+            optimized_atoms=project.atoms,
+            total_energy_hartree=-9.9,
+            normal_termination=True,
+            scf_converged=True,
+            geometry_converged=True,
+        )
+
+    monkeypatch.setattr("backend.app.jobs.manager.OpiAdapter.run", create_neb_result)
+    record = manager.create(water_project, JobMode.ORCA)
+    assert wait_terminal(manager, record.id).state == JobState.SUCCEEDED
+    manifest = tmp_path / str(record.id) / "reaction-path.json"
+    assert manifest.is_file()
+    assert '"sourceType": "neb"' in manifest.read_text(encoding="utf-8")
     manager.executor.shutdown()

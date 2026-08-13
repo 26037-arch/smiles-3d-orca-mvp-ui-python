@@ -19,6 +19,8 @@ from ..models import (
     MoleculeProject,
     Orbital,
 )
+from ..reaction_path import ReactionPathError
+from ..reaction_path.importer import ReactionPathManifestGenerator
 from ..validation import validate_project
 
 
@@ -208,6 +210,16 @@ class JobManager:
             (self._job_dir(job_id) / "result.json").write_text(
                 result.model_dump_json(indent=2), encoding="utf-8"
             )
+            try:
+                manifest = ReactionPathManifestGenerator().generate_if_available(
+                    self._job_dir(job_id)
+                )
+                if manifest is not None:
+                    self._log(job_id, "반응 경로 manifest를 자동 생성했습니다")
+            except ReactionPathError as exc:
+                # A malformed optional trajectory must not turn an otherwise valid
+                # electronic-structure result into a failed calculation.
+                self._log(job_id, f"반응 경로 manifest 생성 건너뜀 [{exc.code}]: {exc.detail}")
             self._update(job_id, state=JobState.SUCCEEDED, progress=1, message="완료")
         except ChemistryError as exc:
             state = JobState.CANCELLED if exc.code == "CANCELLED" else JobState.FAILED

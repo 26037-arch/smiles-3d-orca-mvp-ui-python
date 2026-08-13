@@ -96,17 +96,23 @@ XYZ에는 결합 정보가 없으므로 import 후 결합을 다시 추론한다
 
 ## 계산된 반응 경로 재생
 
-계산 설정의 `계산 종류`에서 `반응 경로`를 선택하면 현재 계산 작업의
-`data/jobs/<UUID>/reaction-path.json`을 불러올 수 있다. 이 모드는 NEB·IRC를 실행하지 않으며,
-표시 프레임은 실제 시간 trajectory가 아니다. 계산 프리셋과 계산 종류는 독립 상태다.
+계산 설정의 `계산 종류`에서 `반응 경로`를 선택하면 현재 작업 폴더에서 최종 ORCA NEB
+`*_MEP_trj.xyz` 또는 양방향 IRC `*_IRC_Full_trj.xyz`를 찾는다. manifest가 없으면 같은 작업
+폴더의 `data/jobs/<UUID>/reaction-path.json`으로 자동 생성한다. `*_MEP_ALL_trj.xyz`와 부분 IRC
+trajectory는 최종 경로로 추측하지 않는다. 이 모드는 새로운 NEB·IRC 계산을 실행하지 않으며,
+표시 프레임은 실제 시간 trajectory가 아니다.
 
-manifest는 UTF-8 JSON이며 최상위 `schemaVersion: 1`, `energyUnit`(`hartree`, `kj/mol`, `eV`),
-`sourceType`, `atomCount`, `elements`, `charge`, `multiplicity`, `hasPhysicalTime: false`, `images`를
-가진다. 각 계산 지점은 연속된 `index`, 고유 `id`, 원자별 `element`, `atomIndex`, `x/y/z`,
-`energy` 또는 `energyHartree`, 선택적 `reactionCoordinate`, `wavefunctionRef`, `orbitalRefs`,
-`convergence`를 가진다. `wavefunctionRef`와 `orbitalRefs`의 값은 작업 디렉터리 기준 상대 경로만
-허용하며 절대 경로와 `..`를 거부한다. 파일이 빠진 경우 원자 경로는 재생하고 MO만 부분 실패로
-표시한다. 작은 전체 예시는 [테스트 fixture](tests/fixtures/reaction-path.json)에 있다.
+자동 manifest는 UTF-8 JSON이며 `schemaVersion: 1`, `sourceType`, `sourceTrajectory`,
+`energyReference: first-image`, `energyUnit: hartree`, `relativeEnergyUnit: kJ/mol`, 원본 파일의
+크기·수정 시각·SHA-256과 실제 계산 이미지들을 기록한다. 명시적인 ORCA 에너지 표기가 없는
+이미지의 에너지는 `null`이며 보간해 저장하지 않는다. 원본 fingerprint나 schema가 달라지면
+지연 조회 시 원자적으로 재생성한다. 기존 version 1 수동 manifest의 eV·kJ/mol 입력 호환성도
+유지한다.
+
+`wavefunctionRef`와 `orbitalRefs`는 작업 디렉터리 기준의 존재하는 상대 경로만 허용하며 절대 경로,
+`..`, symlink를 통한 이탈을 거부한다. trajectory만으로 이미지별 GBW 대응을 추측하지 않으므로
+자동 생성 경로의 `wavefunctionRef`는 `null`이다. 이 경우에도 구조 경로는 정상 재생하고 MO
+컨트롤만 비활성화한다. 작은 수동 manifest 예시는 [테스트 fixture](tests/fixtures/reaction-path.json)에 있다.
 
 백엔드는 첫 계산 지점을 기준으로 질량 가중 Kabsch 정렬을 하고, 단조 반응좌표 또는 정렬 좌표의
 누적 길이를 0..1로 정규화한다. 표시 좌표는 구간별 cubic Hermite로 만들며 두 지점뿐인 경로,

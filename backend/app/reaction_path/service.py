@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+from copy import deepcopy
 from pathlib import Path, PurePath
 from uuid import UUID
 
@@ -11,6 +12,8 @@ from ..models import ReactionPathPlayback, ReactionPathResult
 from ..surfaces.cube import read_cube
 from ..surfaces.mesh import contour_to_ply
 from .geometry import create_display_frames, image_coordinates, mass_weighted_kabsch_transform
+from .errors import ReactionPathError
+from .importer import ReactionPathManifestGenerator
 from .orbitals import (
     GridOrbitalOverlapProvider,
     OrbitalTracker,
@@ -22,15 +25,8 @@ from .orbitals import (
 )
 
 
-HARTREE_TO_KJ_MOL = 2625.4996394799
+HARTREE_TO_KJ_MOL = 2625.499638
 EV_TO_HARTREE = 1 / 27.211386245988
-
-
-class ReactionPathError(ValueError):
-    def __init__(self, code: str, detail: str):
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
 
 
 def _contained_reference(job_dir: Path, reference: str, *, require_exists: bool = False) -> str:
@@ -50,15 +46,14 @@ def _contained_reference(job_dir: Path, reference: str, *, require_exists: bool 
 class ReactionPathService:
     def __init__(self, jobs):
         self.jobs = jobs
+        self.generator = ReactionPathManifestGenerator()
         self._cache: dict[tuple[UUID, int], ReactionPathPlayback] = {}
         self._cube_cache: dict[tuple[Path, int], object] = {}
         self._overlap_cache: dict[tuple[Path, int, Path, int], float] = {}
 
     def load(self, job_id: UUID) -> ReactionPathPlayback:
         job_dir = self.jobs._job_dir(job_id)
-        manifest = job_dir / "reaction-path.json"
-        if not manifest.is_file():
-            raise ReactionPathError("REACTION_PATH_NOT_FOUND", "계산된 반응 경로가 없습니다")
+        manifest = self.generator.ensure(job_dir)
         key = (job_id, manifest.stat().st_mtime_ns)
         if key in self._cache:
             return self._cache[key]
@@ -216,6 +211,7 @@ class ReactionPathService:
         return overlap
 
     def _parse(self, job_dir: Path, raw: dict) -> ReactionPathPlayback:
+        raw = deepcopy(raw)
         unit = raw.pop("energyUnit", None)
         if unit not in {"hartree", "kj/mol", "eV"}:
             raise ReactionPathError("ENERGY_UNIT_REQUIRED", "energyUnit는 hartree, kj/mol 또는 eV여야 합니다")
@@ -224,17 +220,43 @@ class ReactionPathService:
             raise ReactionPathError("TOO_FEW_IMAGES", "반응 경로에는 계산 지점이 두 개 이상 필요합니다")
         energies: list[float | None] = []
         for item in raw_images:
+            if not isinstance(item, dict):
+                raise ReactionPathError(
+                    "INVALID_REACTION_PATH_MANIFEST", "Each reaction-path image must be an object."
+                )
             if "energy" in item:
                 value = item.pop("energy")
-                hartree = value if unit == "hartree" else value / HARTREE_TO_KJ_MOL if unit == "kj/mol" else value * EV_TO_HARTREE
+                if value is None:
+                    hartree = None
+                elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                    hartree = value if unit == "hartree" else value / HARTREE_TO_KJ_MOL if unit == "kj/mol" else value * EV_TO_HARTREE
+                else:
+                    raise ReactionPathError(
+                        "INVALID_REACTION_PATH_MANIFEST", "Image energy must be numeric or null."
+                    )
                 item["energyHartree"] = hartree
-            energies.append(item.get("energyHartree"))
-        finite_energies = [value for value in energies if value is not None]
-        if finite_energies:
-            minimum = min(finite_energies)
+            energy = item.get("energyHartree")
+            if energy is not None and (
+                not isinstance(energy, (int, float)) or isinstance(energy, bool)
+            ):
+                raise ReactionPathError(
+                    "INVALID_REACTION_PATH_MANIFEST", "energyHartree must be numeric or null."
+                )
+            energies.append(energy)
+        if energies and energies[0] is not None:
+            reference = energies[0]
             for item in raw_images:
-                if item.get("energyHartree") is not None and item.get("relativeEnergyKjMol") is None:
-                    item["relativeEnergyKjMol"] = (item["energyHartree"] - minimum) * HARTREE_TO_KJ_MOL
+                item["relativeEnergyKjMol"] = (
+                    None
+                    if item.get("energyHartree") is None
+                    else (
+                        item["energyHartree"] - reference
+                    ) * HARTREE_TO_KJ_MOL
+                )
+        else:
+            for item in raw_images:
+                item["relativeEnergyKjMol"] = None
+        raw["energyUnit"] = "hartree"
         try:
             result = ReactionPathResult.model_validate(raw)
         except ValidationError as exc:
@@ -247,6 +269,17 @@ class ReactionPathService:
     def _validate_images(job_dir: Path, result: ReactionPathResult) -> None:
         if len(result.elements) != result.atom_count:
             raise ReactionPathError("ATOM_COUNT_MISMATCH", "elements와 atomCount가 일치하지 않습니다")
+        if result.source_trajectory:
+            _contained_reference(job_dir, result.source_trajectory, require_exists=True)
+        if result.source_metadata:
+            metadata_path = _contained_reference(
+                job_dir, result.source_metadata.path, require_exists=True
+            )
+            if result.source_trajectory and metadata_path != result.source_trajectory:
+                raise ReactionPathError(
+                    "REACTION_PATH_SOURCE_MISMATCH",
+                    "sourceTrajectory and sourceMetadata.path must refer to the same file.",
+                )
         if [image.index for image in result.images] != list(range(len(result.images))):
             raise ReactionPathError("IMAGE_INDEX_MISMATCH", "계산 지점 index는 0부터 연속이어야 합니다")
         for image in result.images:
@@ -257,6 +290,6 @@ class ReactionPathService:
             if [atom.element for atom in image.atoms] != result.elements:
                 raise ReactionPathError("ELEMENT_ORDER_MISMATCH", f"계산 지점 {image.index}의 원소 또는 원자 순서가 다릅니다")
             if image.wavefunction_ref:
-                _contained_reference(job_dir, image.wavefunction_ref)
+                _contained_reference(job_dir, image.wavefunction_ref, require_exists=True)
             for reference in image.orbital_refs.values():
-                _contained_reference(job_dir, reference)
+                _contained_reference(job_dir, reference, require_exists=True)

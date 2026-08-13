@@ -231,6 +231,14 @@ class CalculatedImage(StrictModel):
         return self
 
 
+class ReactionPathSourceMetadata(StrictModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True, frozen=True)
+    path: str
+    size: int = Field(ge=0)
+    mtime_ns: int = Field(alias="mtimeNs", ge=0)
+    sha256: str = Field(min_length=64, max_length=64)
+
+
 class ReactionPathResult(StrictModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True, frozen=True)
     schema_version: Literal[1] = Field(alias="schemaVersion")
@@ -241,6 +249,20 @@ class ReactionPathResult(StrictModel):
     multiplicity: int | None = Field(default=None, ge=1)
     images: list[CalculatedImage]
     has_physical_time: Literal[False] = Field(default=False, alias="hasPhysicalTime")
+    energy_unit: Literal["hartree"] = Field(default="hartree", alias="energyUnit")
+    relative_energy_unit: Literal["kJ/mol"] = Field(
+        default="kJ/mol", alias="relativeEnergyUnit"
+    )
+    energy_reference: Literal["first-image"] = Field(
+        default="first-image", alias="energyReference"
+    )
+    reaction_coordinate_source: Literal[
+        "orca", "derived-aligned-cartesian", "unknown"
+    ] = Field(default="unknown", alias="reactionCoordinateSource")
+    source_trajectory: str | None = Field(default=None, alias="sourceTrajectory")
+    source_metadata: ReactionPathSourceMetadata | None = Field(
+        default=None, alias="sourceMetadata"
+    )
 
 
 class DisplayFrame(StrictModel):

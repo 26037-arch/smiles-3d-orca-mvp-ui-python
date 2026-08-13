@@ -81,6 +81,13 @@ def test_manifest_requires_energy_unit_and_contains_references(tmp_path):
         ReactionPathService(FakeJobs(tmp_path)).load(uuid4())
     assert caught.value.code == "PATH_OUTSIDE_JOB"
 
+    raw = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    raw["sourceTrajectory"] = "../escape_MEP_trj.xyz"
+    (tmp_path / "reaction-path.json").write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ReactionPathError) as caught:
+        ReactionPathService(FakeJobs(tmp_path)).load(uuid4())
+    assert caught.value.code == "PATH_OUTSIDE_JOB"
+
 
 def test_mass_weighted_kabsch_removes_rigid_rotation_and_translation():
     reference = np.asarray([[0, 0, 0], [1, 0, 0], [0, 2, 0]], dtype=float)

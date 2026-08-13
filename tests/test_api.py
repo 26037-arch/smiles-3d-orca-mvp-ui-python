@@ -74,3 +74,39 @@ def test_reaction_path_route_loads_versioned_manifest(monkeypatch, tmp_path):
     assert len(payload["displayFrames"]) == 17
     assert payload["displayFrames"][0]["isCalculated"] is True
     assert payload["displayFrames"][1]["isCalculated"] is False
+
+
+def test_reaction_path_route_lazily_generates_manifest(monkeypatch, tmp_path):
+    monkeypatch.setenv("GEOORCA_JOBS_DIR", str(tmp_path))
+    job_id = "00000000-0000-0000-0000-000000000003"
+    job_dir = tmp_path / job_id
+    job_dir.mkdir()
+    (job_dir / "reaction_MEP_trj.xyz").write_text(
+        "2\nEnergy = -5.0 Eh\nH 0 0 0\nH 1 0 0\n"
+        "2\nEnergy = -4.9 Eh\nH 0.1 0 0\nH 1.1 0 0\n",
+        encoding="utf-8",
+    )
+    with TestClient(app) as client:
+        response = client.get(f"/api/jobs/{job_id}/reaction-path")
+    assert response.status_code == 200
+    assert response.json()["path"]["sourceType"] == "neb"
+    assert (job_dir / "reaction-path.json").is_file()
+
+
+def test_reaction_path_route_distinguishes_missing_and_invalid_source(monkeypatch, tmp_path):
+    monkeypatch.setenv("GEOORCA_JOBS_DIR", str(tmp_path))
+    missing_id = "00000000-0000-0000-0000-000000000004"
+    invalid_id = "00000000-0000-0000-0000-000000000005"
+    (tmp_path / missing_id).mkdir()
+    invalid_dir = tmp_path / invalid_id
+    invalid_dir.mkdir()
+    (invalid_dir / "reaction_IRC_Full_trj.xyz").write_text(
+        "2\ncomment\nH 0 0 0\n", encoding="utf-8"
+    )
+    with TestClient(app) as client:
+        missing = client.get(f"/api/jobs/{missing_id}/reaction-path")
+        invalid = client.get(f"/api/jobs/{invalid_id}/reaction-path")
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["code"] == "REACTION_PATH_NOT_FOUND"
+    assert invalid.status_code == 422
+    assert invalid.json()["detail"]["code"] == "TRUNCATED_XYZ_FRAME"

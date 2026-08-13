@@ -13,6 +13,8 @@
 - OPI 2.0 공개 API 기반 입력·파싱·MO/Cube 경계
 - Cube 축/origin/단위 파싱, PyVista contour, PLY mesh와 hash cache
 - total density/MO 독립 표면, ± 위상 색, opacity/isovalue, MO energy diagram
+- 기존 ORCA `*_MEP_trj.xyz`·`*_IRC_Full_trj.xyz` 자동 탐색, 검증, 원자적
+  `reaction-path.json` 생성과 구조 경로 재생
 - H2O, CH4, F− 예제와 명시적 데모 계산 경로
 
 ## 환경 의존 검증
@@ -23,15 +25,17 @@
 
 Windows CP949 로캘에서 ORCA의 UTF-8 em dash를 OPI grepper가 읽지 못하던 문제는 출력의 ASCII 수렴 마커를 바이트로 검사하도록 어댑터를 수정해 해결했다.
 
-## 실행한 검증 (2026-08-13)
+## 실행한 검증 (2026-08-14)
 
-- `python -m pytest -q --basetemp test-artifacts/cp949-final-fix -p no:cacheprovider` → **28 passed**
+- `python -m pytest -q -p no:cacheprovider` → **84 passed, 1 deselected**
 - `python -m ruff check backend tests` → **All checks passed**
-- `npm.cmd test` → **4 files, 14 tests passed**
+- `npm.cmd test` → **11 files, 50 tests passed**
 - `npm.cmd run lint` → **0 errors**
-- `npm.cmd run build` → **성공**, Vite 2,237 modules transformed. Three.js vendor를 포함한 500 kB 초과 chunk 경고는 남음.
+- `npm.cmd run build` → **성공**, Vite 2,250 modules transformed. Three.js/Plotly를 포함한 500 kB 초과 chunk 경고는 남음.
 - 로컬 브라우저 smoke: H2O 좌표 생성, 선택 원자 좌표 `[-0.24, 0.93, 0] → [-0.50, 0.93, 0]`, 데모 job `SUCCEEDED`, total density + HOMO surface 2개, console error 없음.
 
 ## 의도적으로 제외
 
-반응 경로/TS/NEB/IRC, 분자동역학, 용매, 주기계, SMILES, conformer 전역 탐색, 계정·원격 계산은 구현하지 않았다.
+새 NEB·IRC 계산 실행, 부분 IRC trajectory 자동 결합, `.interp.final` 에너지 보강,
+이미지별 GBW 대응 추측은 구현하지 않았다. TS 계산, 분자동역학, 용매, 주기계, SMILES,
+conformer 전역 탐색, 계정·원격 계산도 범위 밖이다.

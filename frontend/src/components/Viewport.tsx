@@ -213,11 +213,14 @@ export function ReactionPathControls() {
   }, [selectedOrbital, playback, frameIndex, orbitalTrack, reactionIsovalue, upsertSurface, removeSurface])
 
   if (calculationKind !== 'reaction-path') return null
-  if (!playback) return <div className="reaction-empty" role="status">
-    <strong>계산된 반응 경로가 없습니다.</strong>
-    <span>{status === 'loading-path' ? '기존 결과를 불러오는 중입니다…' : '현재 단계에서는 기존 반응 경로 결과를 불러와 재생할 수 있습니다.'}</span>
-    {error && <em>{error}</em>}
-  </div>
+  if (!playback) {
+    const notFound = !error || error.startsWith('REACTION_PATH_NOT_FOUND')
+    return <div className="reaction-empty" role="status">
+      <strong>{notFound ? '지원되는 반응 경로 결과가 없습니다.' : '반응 경로 결과는 있지만 형식 검증에 실패했습니다.'}</strong>
+      <span>{status === 'loading-path' ? '기존 ORCA 결과를 찾는 중입니다…' : notFound ? '필요한 파일: *_MEP_trj.xyz 또는 *_IRC_Full_trj.xyz' : 'trajectory의 원자 수, 원소 순서와 좌표를 확인하세요.'}</span>
+      {error && !notFound && <em>세부 정보: {error}</em>}
+    </div>
+  }
   const frame = playback.displayFrames[frameIndex]
   const atEnd = frameIndex === playback.displayFrames.length - 1
   const toggle = () => {
@@ -228,11 +231,13 @@ export function ReactionPathControls() {
   const pointText = frame.isCalculated
     ? `계산 지점 ${frame.leftImageIndex + 1}/${playback.path.images.length}`
     : `보간됨 · 지점 ${frame.leftImageIndex + 1}→${frame.rightImageIndex + 1}`
+  const hasWavefunctions = playback.path.images.every(image => Object.keys(image.orbitalRefs).length > 0)
   return <div className="reaction-controls" aria-label="반응 경로 재생">
     <button className="reaction-play" onClick={toggle} aria-label={status === 'playing' ? '일시정지' : '재생'}>{status === 'playing' ? <Pause /> : <Play />}</button>
     <input aria-label="반응 경로 프레임" type="range" min="0" max={playback.displayFrames.length - 1} step="1" value={frameIndex} onChange={event => { setPlaying(false); setFrame(Number(event.target.value)) }} />
     <div className="reaction-frame-info"><strong>{pointText}</strong><span>경로 위치 {(frame.reactionCoordinate * 100).toFixed(1)}%</span></div>
     <div className="reaction-energy">{frame.relativeEnergyKjMol == null ? '에너지 없음' : `${frame.relativeEnergyKjMol.toFixed(2)} kJ/mol${frame.isCalculated ? '' : ' · 보간값'}`}</div>
+    {!hasWavefunctions && <div className="reaction-mo-warning">이 반응 경로에는 이미지별 파동함수 결과가 없습니다. 분자 구조 경로만 재생할 수 있습니다.</div>}
     {selectedOrbital && orbitalTrack.loading && <div className="reaction-mo-warning">선택한 MO의 cube와 중첩을 준비하는 중…</div>}
     {selectedOrbital && !orbitalTrack.loading && !orbitalTrack.active && <div className="reaction-mo-warning">{orbitalTrack.error ?? '대응 오비탈 없음 — 추적 종료'} · 원자 경로는 계속 재생됩니다.</div>}
     <p>계산 경로의 시각적 보간이며 프레임 간격은 실제 시간이 아닙니다.</p>

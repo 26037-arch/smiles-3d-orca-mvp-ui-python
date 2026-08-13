@@ -69,7 +69,7 @@ export interface CalculatedImage {
   relativeEnergyKjMol: number | null
   reactionCoordinate: number | null
   gradient?: number[][]
-  wavefunctionRef?: string
+  wavefunctionRef?: string | null
   orbitalRefs: Record<string, string>
   convergence: 'converged' | 'unconverged' | 'unknown'
 }
@@ -83,6 +83,17 @@ export interface ReactionPathResult {
   multiplicity: number | null
   images: CalculatedImage[]
   hasPhysicalTime: false
+  sourceTrajectory?: string | null
+  energyReference?: 'first-image'
+  energyUnit?: 'hartree'
+  relativeEnergyUnit?: 'kJ/mol'
+  reactionCoordinateSource?: 'orca' | 'derived-aligned-cartesian' | 'unknown'
+  sourceMetadata?: {
+    path: string
+    size: number
+    mtimeNs: number
+    sha256: string
+  } | null
 }
 
 export interface DisplayFrame {
