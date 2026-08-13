@@ -65,8 +65,8 @@ function AngleMeasure({ atoms, ids }: { atoms: Atom[]; ids: string[] }) {
 
 function SurfaceMesh({ layer, phase, url }: { layer: SurfaceLayer; phase: string; url: string }) {
   const geometry = useLoader(PLYLoader, url); useMemo(() => geometry.computeVertexNormals(), [geometry])
-  return <mesh geometry={geometry} renderOrder={phase === 'positive' ? 10 : 11}>
-    <meshPhongMaterial color={phase === 'positive' ? layer.positiveColor : layer.negativeColor} transparent opacity={layer.opacity} side={THREE.DoubleSide} depthWrite={false} shininess={50} />
+  return <mesh geometry={geometry}>
+    <meshPhongMaterial color={phase === 'positive' ? layer.positiveColor : layer.negativeColor} transparent opacity={layer.opacity} side={THREE.DoubleSide} depthTest depthWrite shininess={50} />
   </mesh>
 }
 

@@ -1,7 +1,7 @@
 import type { CalculationResult, Capabilities, MoleculeProject } from '../types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, { ...init, headers: { 'Content-Type': 'application/json', ...init?.headers } })
+  const response = await fetch(path, { ...init, cache: 'no-store', headers: { 'Content-Type': 'application/json', ...init?.headers } })
   if (!response.ok) {
     const body = await response.json().catch(() => null)
     const detail = body?.detail?.message ?? body?.detail

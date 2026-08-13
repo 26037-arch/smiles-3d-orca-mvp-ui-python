@@ -3,6 +3,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $backend = $null
 $backendOwned = $false
 $locationPushed = $false
+$requiredSurfacePipeline = 'cube-parser-v4'
 
 function Get-ListenerProcess([int]$Port) {
     return Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
@@ -12,9 +13,43 @@ function Get-ListenerProcess([int]$Port) {
 function Test-GeoOrcaBackend {
     try {
         $health = Invoke-RestMethod -Uri 'http://127.0.0.1:8000/api/health' -TimeoutSec 2
+        return $health.status -eq 'ok' -and
+            $health.service -eq 'GeoORCA local backend' -and
+            $health.surface_pipeline -eq $requiredSurfacePipeline
+    }
+    catch { return $false }
+}
+
+function Test-GeoOrcaService {
+    try {
+        $health = Invoke-RestMethod -Uri 'http://127.0.0.1:8000/api/health' -TimeoutSec 2
         return $health.status -eq 'ok' -and $health.service -eq 'GeoORCA local backend'
     }
     catch { return $false }
+}
+
+function Stop-StaleGeoOrcaBackend($Listener) {
+    $currentId = [int]$Listener.OwningProcess
+    $backendProcessId = $null
+    for ($depth = 0; $depth -lt 6 -and $currentId -gt 0; $depth++) {
+        $candidate = Get-CimInstance Win32_Process -Filter "ProcessId = $currentId" -ErrorAction SilentlyContinue
+        if (-not $candidate) { break }
+        if ($candidate.CommandLine -match 'uvicorn' -and
+            $candidate.CommandLine -match 'backend\.app\.main:app') {
+            $backendProcessId = [int]$candidate.ProcessId
+        }
+        $currentId = [int]$candidate.ParentProcessId
+    }
+    if (-not $backendProcessId) {
+        throw 'An outdated GeoORCA backend is running, but its process could not be verified safely. Stop the process on port 8000 and run this script again.'
+    }
+    Write-Host "Restarting outdated GeoORCA backend (PID $backendProcessId)."
+    & taskkill.exe /PID $backendProcessId /T /F | Out-Null
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        if (-not (Get-ListenerProcess 8000)) { return }
+        Start-Sleep -Milliseconds 125
+    }
+    throw 'The outdated GeoORCA backend did not release port 8000.'
 }
 
 function Test-GeoOrcaFrontend {
@@ -29,6 +64,11 @@ $backendListener = Get-ListenerProcess 8000
 $frontendListener = Get-ListenerProcess 5173
 $backendReady = Test-GeoOrcaBackend
 $frontendReady = Test-GeoOrcaFrontend
+
+if ($backendListener -and -not $backendReady -and (Test-GeoOrcaService)) {
+    Stop-StaleGeoOrcaBackend $backendListener
+    $backendListener = $null
+}
 
 if ($backendListener -and -not $backendReady) {
     $process = Get-Process -Id $backendListener.OwningProcess -ErrorAction SilentlyContinue

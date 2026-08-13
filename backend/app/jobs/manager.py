@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import shutil
 import subprocess
 import threading
@@ -13,7 +12,6 @@ from uuid import UUID, uuid4
 from ..chemistry.opi_adapter import ChemistryError, OpiAdapter, _terminate_process_tree
 from ..config import LocalSettings
 from ..models import (
-    Atom,
     CalculationResult,
     JobMode,
     JobRecord,
@@ -243,14 +241,8 @@ class JobManager:
                 raise ChemistryError("CANCELLED", "사용자가 계산을 취소했습니다")
             self._log(job_id, f"{message} (실제 ORCA 계산이 아님)")
             self._update(job_id, progress=progress)
-        # Deterministic, small displacement: this is UI development data, never a physical claim.
-        center = tuple(sum(a.position[k] for a in project.atoms) / len(project.atoms) for k in range(3))
-        optimized: list[Atom] = []
-        for atom in project.atoms:
-            delta = tuple(atom.position[k] - center[k] for k in range(3))
-            norm = math.sqrt(sum(x * x for x in delta)) or 1
-            position = tuple(atom.position[k] - 0.015 * delta[k] / norm for k in range(3))
-            optimized.append(atom.model_copy(update={"position": position}))
+        # Demo mode must not imply an optimization or silently alter coordinates.
+        optimized = [atom.model_copy(deep=True) for atom in project.atoms]
         energies = [-1.2, -0.72, -0.48, -0.31, 0.08, 0.21, 0.43]
         occupied = max(1, min(4, (sum(_atomic_number(a.element) for a in project.atoms) - project.total_charge) // 2))
         orbitals = [

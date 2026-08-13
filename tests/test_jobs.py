@@ -26,6 +26,7 @@ def test_demo_job_success_and_result_persists(tmp_path, water_project):
     result = manager.result(record.id)
     assert result.demo and result.geometry_converged
     assert [a.id for a in result.optimized_atoms] == [a.id for a in water_project.atoms]
+    assert [a.position for a in result.optimized_atoms] == [a.position for a in water_project.atoms]
     assert (tmp_path / str(record.id) / "project.json").is_file()
     assert (tmp_path / str(record.id) / "result.json").is_file()
     manager.executor.shutdown()

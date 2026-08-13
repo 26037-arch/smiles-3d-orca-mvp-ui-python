@@ -16,6 +16,7 @@ from ..chemistry.presets import PRESETS
 from ..config import configure_orca_environment, load_settings, save_orca_path
 from ..jobs.manager import JobManager
 from ..models import JobCreate, MoleculeProject, SurfaceRequest
+from ..surfaces.mesh import MESH_CACHE_VERSION
 from ..surfaces.service import SurfaceService
 from ..validation import validate_project
 
@@ -37,7 +38,12 @@ def error(status: int, code: str, detail: str) -> HTTPException:
 
 @router.get("/health")
 def health() -> dict[str, object]:
-    return {"status": "ok", "service": "GeoORCA local backend", "bind": "127.0.0.1"}
+    return {
+        "status": "ok",
+        "service": "GeoORCA local backend",
+        "bind": "127.0.0.1",
+        "surface_pipeline": MESH_CACHE_VERSION,
+    }
 
 
 @router.get("/capabilities")
@@ -165,6 +171,11 @@ def create_surface(job_id: UUID, body: SurfaceRequest, request: Request):
 def surface_mesh(job_id: UUID, surface_id: str, request: Request) -> FileResponse:
     try:
         path = surfaces(request).mesh_path(job_id, surface_id)
-        return FileResponse(path, media_type="application/octet-stream", filename=path.name)
+        return FileResponse(
+            path,
+            media_type="application/octet-stream",
+            filename=path.name,
+            headers={"Cache-Control": "no-store"},
+        )
     except FileNotFoundError as exc:
         raise error(404, "MESH_NOT_FOUND", "표면 메시를 찾을 수 없습니다") from exc
