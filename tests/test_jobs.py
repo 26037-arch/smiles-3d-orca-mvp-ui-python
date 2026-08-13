@@ -52,6 +52,44 @@ def test_restart_marks_running_as_interrupted(tmp_path):
     manager.executor.shutdown()
 
 
+def test_restart_migrates_legacy_cp949_failure(tmp_path):
+    job_id = uuid4()
+    folder = tmp_path / str(job_id)
+    folder.mkdir()
+    failed = JobRecord(
+        id=job_id,
+        state=JobState.FAILED,
+        mode=JobMode.ORCA,
+        created_at=now(),
+        updated_at=now(),
+        error_code="INTERNAL_ERROR",
+        error_detail="'cp949' codec can't decode byte 0xe2 in position 6388",
+    )
+    (folder / "job.json").write_text(failed.model_dump_json(), encoding="utf-8")
+
+    manager = JobManager(LocalSettings(jobs_dir=str(tmp_path)))
+    recovered = manager.get(job_id)
+    assert recovered.error_code == "LEGACY_OUTPUT_ENCODING"
+    assert "cp949" not in (recovered.error_detail or "").lower()
+    manager.executor.shutdown()
+
+
+def test_unicode_decode_failure_is_not_exposed_as_internal_error(
+    tmp_path, water_project, monkeypatch
+):
+    manager = JobManager(LocalSettings(jobs_dir=str(tmp_path), orca_path="orca"))
+
+    def fail_decode(*args, **kwargs):
+        raise UnicodeDecodeError("cp949", b"\xe2", 0, 1, "illegal multibyte sequence")
+
+    monkeypatch.setattr("backend.app.jobs.manager.OpiAdapter.run", fail_decode)
+    record = manager.create(water_project, JobMode.ORCA)
+    finished = wait_terminal(manager, record.id)
+    assert finished.error_code == "OUTPUT_ENCODING_ERROR"
+    assert "codec can't decode" not in (finished.error_detail or "")
+    manager.executor.shutdown()
+
+
 def test_uuid_job_paths_cannot_traverse(tmp_path):
     manager = JobManager(LocalSettings(jobs_dir=str(tmp_path)))
     path = manager._job_dir(uuid4())

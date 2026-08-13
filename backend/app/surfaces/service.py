@@ -74,6 +74,11 @@ class SurfaceService:
             raise RuntimeError("Cube 생성에 필요한 OPI 2.0을 import할 수 없습니다") from exc
         basename = "electronic" if (job_dir / "electronic.gbw").exists() else "optimization"
         output = Output(basename, working_dir=job_dir, version_check=False, parse=False)
+        # plot_mo/plot_density index into this collection even when parsing is
+        # intentionally disabled. Populate it from the existing GBW files first.
+        output.collect_gbw_json_files()
+        if not output.gbw_json_files:
+            raise RuntimeError("MO/밀도 생성에 필요한 ORCA GBW 파일을 찾지 못했습니다")
         if request.field == "total_density":
             cube_output = output.plot_density(resolution=40, timeout=600)
             cube_path = job_dir / f"{basename}.density.cube"

@@ -4,6 +4,7 @@ import math
 import shutil
 import subprocess
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -56,7 +57,16 @@ class JobManager:
                 f"{destination.name}.{threading.get_ident()}.tmp"
             )
             temporary.write_text(record.model_dump_json(indent=2), encoding="utf-8")
-            temporary.replace(destination)
+            for attempt in range(8):
+                try:
+                    temporary.replace(destination)
+                    break
+                except PermissionError:
+                    if attempt == 7:
+                        raise
+                    # Windows may briefly deny replacement while another handle
+                    # is closing. Readers use the same lock; retry external locks.
+                    time.sleep(0.01 * (attempt + 1))
 
     def _recover_interrupted(self) -> None:
         for path in self.root.glob("*/job.json"):
@@ -69,6 +79,21 @@ class JobManager:
                 record.error_code = "INTERRUPTED"
                 record.error_detail = "서버 재시작으로 계산이 중단되었습니다"
                 record.message = "중단됨"
+                self._write_record(record)
+            elif (
+                record.state == JobState.FAILED
+                and record.error_detail
+                and "cp949" in record.error_detail.lower()
+                and "decode" in record.error_detail.lower()
+            ):
+                # Migrate failures written by the pre-UTF-8 adapter so clients do
+                # not keep restoring a raw Python codec exception after upgrade.
+                record.error_code = "LEGACY_OUTPUT_ENCODING"
+                record.error_detail = (
+                    "이전 서버의 ORCA 출력 인코딩 처리로 중단된 작업입니다. "
+                    "백엔드를 재시작한 뒤 계산을 다시 실행하세요."
+                )
+                record.message = "이전 인코딩 오류 작업"
                 self._write_record(record)
 
     def create(self, project: MoleculeProject, mode: JobMode) -> JobRecord:
@@ -119,10 +144,11 @@ class JobManager:
             total -= size
 
     def get(self, job_id: UUID) -> JobRecord:
-        path = self._record_path(job_id)
-        if not path.is_file():
-            raise FileNotFoundError(str(job_id))
-        return JobRecord.model_validate_json(path.read_text(encoding="utf-8"))
+        with self.lock:
+            path = self._record_path(job_id)
+            if not path.is_file():
+                raise FileNotFoundError(str(job_id))
+            return JobRecord.model_validate_json(path.read_text(encoding="utf-8"))
 
     def result(self, job_id: UUID) -> CalculationResult:
         record = self.get(job_id)
@@ -166,8 +192,8 @@ class JobManager:
     def _run(self, job_id: UUID, project: MoleculeProject, mode: JobMode, cancel: threading.Event) -> None:
         if cancel.is_set():
             return
-        self._update(job_id, state=JobState.RUNNING, progress=0.05, message="시작")
         try:
+            self._update(job_id, state=JobState.RUNNING, progress=0.05, message="시작")
             if mode == JobMode.DEMO:
                 result = self._demo(job_id, project, cancel)
             else:
@@ -190,6 +216,17 @@ class JobManager:
             self._update(
                 job_id, state=state, message=exc.detail,
                 error_code=exc.code, error_detail=exc.detail,
+            )
+        except UnicodeDecodeError as exc:
+            self._update(
+                job_id,
+                state=JobState.FAILED,
+                message="ORCA 출력 인코딩 오류",
+                error_code="OUTPUT_ENCODING_ERROR",
+                error_detail=(
+                    f"{exc.encoding}으로 ORCA 출력을 읽지 못했습니다. "
+                    "UTF-8 백엔드로 다시 시작한 뒤 계산을 재실행하세요."
+                ),
             )
         except Exception as exc:  # job boundary: preserve structured failure on unexpected errors
             self._update(

@@ -10,6 +10,7 @@ from threading import Event
 from typing import Callable
 
 from ..models import CalculationResult, MoleculeProject, Orbital
+from .encoding import install_opi_utf8_compatibility
 from .presets import get_preset
 
 
@@ -59,6 +60,7 @@ class OpiAdapter:
         cancel_event: Event,
         process_started: Callable[[subprocess.Popen[str]], None] | None = None,
     ) -> CalculationResult:
+        install_opi_utf8_compatibility()
         calc = self.build_calculator(project, workdir)
         self.log("OPI 입력 작성")
         calc.write_input()

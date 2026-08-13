@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api.routes import router
+from .chemistry.encoding import install_opi_utf8_compatibility
 from .config import configure_orca_environment, load_settings
 from .jobs.manager import JobManager
 from .surfaces.service import SurfaceService
@@ -14,6 +15,8 @@ from .surfaces.service import SurfaceService
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = load_settings()
+    # Install before diagnostics, jobs, or OPI parsing can touch ORCA text files.
+    install_opi_utf8_compatibility()
     configure_orca_environment(settings.orca_path)
     app.state.jobs = JobManager(settings)
     app.state.surfaces = SurfaceService(app.state.jobs)

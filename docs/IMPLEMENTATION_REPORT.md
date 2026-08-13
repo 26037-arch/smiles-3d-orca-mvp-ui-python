@@ -25,7 +25,7 @@ Windows CP949 로캘에서 ORCA의 UTF-8 em dash를 OPI grepper가 읽지 못하
 
 ## 실행한 검증 (2026-08-13)
 
-- `python -m pytest -q --basetemp test-artifacts/cp949-fix-full -p no:cacheprovider` → **25 passed**
+- `python -m pytest -q --basetemp test-artifacts/cp949-final-fix -p no:cacheprovider` → **28 passed**
 - `python -m ruff check backend tests` → **All checks passed**
 - `npm.cmd test` → **4 files, 14 tests passed**
 - `npm.cmd run lint` → **0 errors**

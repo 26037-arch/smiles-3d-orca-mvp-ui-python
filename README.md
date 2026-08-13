@@ -70,7 +70,7 @@ Invoke-RestMethod -Method Put -Uri http://127.0.0.1:8000/api/settings/orca-path 
 브라우저에서 `http://127.0.0.1:5173`을 연다. 개별 실행은 다음과 같다.
 
 ```powershell
-python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
+python -X utf8 -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
 Set-Location frontend; npm.cmd run dev
 ```
 
@@ -116,6 +116,7 @@ python -m pytest -m orca
 ## 문제 해결
 
 - Windows에서 `'cp949' codec can't decode byte 0xe2` 오류가 나더라도 ORCA 계산 자체가 실패했다는 뜻은 아닙니다. ORCA 6.1 출력의 UTF-8 문장부호와 Windows CP949 로캘이 충돌할 수 있으며, 현재 어댑터는 정상 종료·SCF·geometry 수렴 마커를 바이트로 검사해 이 문제를 회피합니다.
+  이전 백엔드가 실행 중이었다면 터미널에서 종료한 뒤 `\.\scripts\dev.ps1`로 다시 시작해야 수정된 모듈이 로드됩니다.
 
 - ORCA 미탐지: `GEOORCA_ORCA_PATH`가 실제 `orca.exe`를 가리키는지 `/api/capabilities`에서 확인한다.
 - 버전 불일치: OPI 2.0에는 ORCA 6.1.1 이상이 필요하다.

@@ -26,6 +26,12 @@ export default function App() {
     let poll: number | undefined
     if (lastJob) {
       const refresh = () => api.getJob(lastJob).then(async record => {
+        if (record.error_code === 'LEGACY_OUTPUT_ENCODING' || /cp949.*decode/i.test(record.error_detail ?? '')) {
+          localStorage.removeItem('geoorca.lastJobId'); setJob(undefined)
+          setNotice('이전 버전의 출력 인코딩 오류 작업을 지웠습니다. ORCA 계산을 다시 실행하세요.')
+          if (poll) window.clearInterval(poll)
+          return
+        }
         setJob(record)
         if (record.state === 'SUCCEEDED') { useProjectStore.getState().applyResult(await api.result(lastJob)); if (poll) window.clearInterval(poll) }
         if (['FAILED', 'CANCELLED'].includes(record.state) && poll) window.clearInterval(poll)
@@ -33,7 +39,7 @@ export default function App() {
       void refresh(); poll = window.setInterval(refresh, 700)
     }
     return () => { unsubscribe(); if (poll) window.clearInterval(poll) }
-  }, [])
+  }, [setNotice])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {

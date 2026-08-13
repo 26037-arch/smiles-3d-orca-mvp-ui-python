@@ -155,7 +155,7 @@ def create_surface(job_id: UUID, body: SurfaceRequest, request: Request):
         return surfaces(request).create(job_id, body)
     except FileNotFoundError as exc:
         raise error(404, "SURFACE_SOURCE_NOT_FOUND", str(exc)) from exc
-    except (ValueError, RuntimeError) as exc:
+    except (IndexError, UnicodeDecodeError, ValueError, RuntimeError) as exc:
         raise error(422, "SURFACE_GENERATION_FAILED", str(exc)) from exc
     except ChemistryError as exc:
         raise error(409, exc.code, exc.detail) from exc

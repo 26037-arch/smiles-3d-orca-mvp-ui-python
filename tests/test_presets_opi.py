@@ -5,6 +5,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from backend.app.chemistry.encoding import install_opi_utf8_compatibility
 from backend.app.chemistry.opi_adapter import ChemistryError, OpiAdapter, _check_output_status
 from backend.app.chemistry.presets import PRESETS, get_preset
 
@@ -77,3 +78,14 @@ def test_output_status_keeps_structured_convergence_errors(tmp_path):
     with pytest.raises(ChemistryError, match="구조 최적화") as error:
         _check_output_status(output, require_geometry=True)
     assert error.value.code == "GEOMETRY_NOT_CONVERGED"
+
+
+def test_opi_grepper_uses_utf8_instead_of_windows_locale(tmp_path):
+    pytest.importorskip("opi")
+    from opi.output.grepper.core import Grepper
+
+    output_file = tmp_path / "optimization.out"
+    output_file.write_bytes("ORCA system—Version 6.1\nSUCCESS\n".encode())
+    install_opi_utf8_compatibility()
+
+    assert list(Grepper(output_file).open_file())[-1] == "SUCCESS\n"

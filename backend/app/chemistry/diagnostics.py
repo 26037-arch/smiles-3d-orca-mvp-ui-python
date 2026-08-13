@@ -28,7 +28,8 @@ def _version(path: str | None) -> tuple[str | None, bool, str | None]:
         return None, False, "ORCA 실행 파일을 찾지 못했습니다"
     try:
         completed = subprocess.run(
-            [path, "--version"], capture_output=True, text=True, timeout=5, shell=False
+            [path, "--version"], capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=5, shell=False
         )
         text = completed.stdout + completed.stderr
         match = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", text)
@@ -78,4 +79,3 @@ def capabilities(settings: LocalSettings) -> dict[str, object]:
         "calculation": {"available": opi_present and compatible and writable, "reasons": reasons},
         "demo": {"available": settings.demo_calculations, "label": "모의 데이터—실제 양자화학 계산이 아님"},
     }
-
