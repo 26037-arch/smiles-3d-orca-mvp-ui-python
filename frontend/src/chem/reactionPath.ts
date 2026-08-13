@@ -1,7 +1,7 @@
 import { BOND_INFERENCE } from './bonds'
 import { ELEMENTS } from './elements'
 import { distance } from './geometry'
-import type { Atom, Bond, DisplayFrame, MoleculeProject, ReactionPathResult } from '../types'
+import type { Atom, Bond, DisplayFrame, MoleculeProject, ReactionPathPlayback, ReactionPathResult } from '../types'
 
 export const REACTION_PLAYBACK_FRAME_MS = 80
 export const BOND_FORM_TOLERANCE = BOND_INFERENCE.tolerance
@@ -14,6 +14,22 @@ export function advancePlaybackFrame(index: number, frameCount: number): { index
 
 export function playbackStartFrame(index: number, frameCount: number): number {
   return frameCount > 0 && index >= frameCount - 1 ? 0 : index
+}
+
+export function advanceOptimizationPlayback(
+  playback: ReactionPathPlayback,
+  frameIndex: number,
+  scfIterationIndex: number,
+): { frameIndex: number; scfIterationIndex: number; playing: boolean } {
+  const frame = playback.displayFrames[frameIndex]
+  const iterations = frame?.isCalculated
+    ? playback.path.images[frame.leftImageIndex]?.scfIterations?.length ?? 0
+    : 0
+  if (scfIterationIndex < iterations) {
+    return { frameIndex, scfIterationIndex: scfIterationIndex + 1, playing: true }
+  }
+  const next = advancePlaybackFrame(frameIndex, playback.displayFrames.length)
+  return { frameIndex: next.index, scfIterationIndex: 0, playing: next.playing }
 }
 
 const pairKey = (a: string, b: string) => [a, b].sort().join(':')

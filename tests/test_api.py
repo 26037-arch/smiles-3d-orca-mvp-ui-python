@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from uuid import UUID
 
 from fastapi.testclient import TestClient
 
 from backend.app.main import app
-from backend.app.models import OrbitalComposition
+from backend.app.models import (
+    CalculationKind,
+    JobMode,
+    JobRecord,
+    JobState,
+    OrbitalComposition,
+)
 
 
 def test_health_and_orca_missing_capabilities(monkeypatch, tmp_path):
@@ -26,6 +33,41 @@ def test_malformed_job_id_is_rejected(monkeypatch, tmp_path):
     monkeypatch.setenv("GEOORCA_JOBS_DIR", str(tmp_path))
     with TestClient(app) as client:
         assert client.get("/api/jobs/..%2F..%2Fsecret").status_code in {404, 422}
+
+
+def test_job_events_serialize_calculation_kind_with_frontend_alias(monkeypatch, tmp_path):
+    monkeypatch.setenv("GEOORCA_JOBS_DIR", str(tmp_path))
+    job_id = UUID("00000000-0000-0000-0000-000000000003")
+
+    class FakeJobs:
+        def get(self, received_job_id):
+            assert received_job_id == job_id
+            return JobRecord(
+                id=job_id,
+                state=JobState.SUCCEEDED,
+                mode=JobMode.ORCA,
+                calculationKind=CalculationKind.REACTION_PATH,
+                created_at="2026-08-14T00:00:00+00:00",
+                updated_at="2026-08-14T00:00:01+00:00",
+                progress=1,
+                message="완료",
+            )
+
+        def log_text(self, received_job_id):
+            assert received_job_id == job_id
+            return "최적화 경로 manifest 저장"
+
+    with TestClient(app) as client:
+        original_jobs = client.app.state.jobs
+        try:
+            client.app.state.jobs = FakeJobs()
+            response = client.get(f"/api/jobs/{job_id}/events")
+        finally:
+            client.app.state.jobs = original_jobs
+
+    assert response.status_code == 200
+    assert '"calculationKind": "reaction-path"' in response.text
+    assert '"calculation_kind"' not in response.text
 
 
 def test_orbital_composition_route_preserves_five_item_paging(monkeypatch, tmp_path):

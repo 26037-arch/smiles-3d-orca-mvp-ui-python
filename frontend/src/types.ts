@@ -51,21 +51,13 @@ export interface MoleculeProject {
 
 export type OrbitalSpin = 'restricted' | 'alpha' | 'beta'
 export type CalculationKind = 'single' | 'reaction-path'
-export type ReactionEndpointView = 'reactant' | 'product' | 'overlay'
-
-export interface ReactionPathSettings {
-  interpolation: 'idpp'
-  imageCount: number
-}
 
 export type JobCreateRequest =
   | { mode: 'orca' | 'demo'; calculationKind?: 'single'; project: MoleculeProject }
   | {
       mode: 'orca'
       calculationKind: 'reaction-path'
-      reactant: MoleculeProject
-      product: MoleculeProject
-      reactionPathSettings: ReactionPathSettings
+      project: MoleculeProject
     }
 
 export interface JobRecord {
@@ -93,23 +85,31 @@ export interface CalculatedImage {
   index: number
   atoms: CalculatedImageAtom[]
   energyHartree: number | null
+  energyChangeHartree?: number | null
   relativeEnergyKjMol: number | null
   reactionCoordinate: number | null
   gradient?: number[][]
   wavefunctionRef?: string | null
   orbitalRefs: Record<string, string>
+  orbitals?: Orbital[]
+  scfIterations?: ScfIteration[]
+  scfConverged?: boolean | null
+  geometryConverged?: boolean | null
   convergence: 'converged' | 'unconverged' | 'unknown'
 }
 
 export interface ReactionPathResult {
-  schemaVersion: 1
-  sourceType: 'imported' | 'neb' | 'irc' | 'relaxed-scan'
+  schemaVersion: 1 | 2
+  pathType?: 'neb' | 'geometry-optimization' | null
+  sourceType: 'imported' | 'neb' | 'irc' | 'relaxed-scan' | 'orca-optimization'
   atomCount: number
   elements: string[]
   charge: number | null
   multiplicity: number | null
   images: CalculatedImage[]
   hasPhysicalTime: false
+  isPhysicalTimeTrajectory?: false
+  initialGuess?: 'PAtom' | null
   sourceTrajectory?: string | null
   energyReference?: 'first-image'
   energyUnit?: 'hartree'
@@ -132,6 +132,17 @@ export interface DisplayFrame {
   reactionCoordinate: number
   relativeEnergyKjMol: number | null
   isCalculated: boolean
+  frameType?: 'actual-geometry' | 'display-interpolation'
+}
+
+export interface ScfIteration {
+  iteration: number
+  energyHartree: number | null
+  deltaEnergyHartree: number | null
+  rmsDensity: number | null
+  maxDensity: number | null
+  diisError: number | null
+  maxGradient: number | null
 }
 
 export interface ReactionPathPlayback {

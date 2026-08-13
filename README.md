@@ -4,7 +4,7 @@
 
 > 이 앱은 전역적으로 가장 안정한 구조를 찾지 않는다. 결과는 **입력 구조에서 찾은 국소 최적화 구조**다.
 
-표준 ORCA NEB 반응 경로는 지원한다. IRC/전이상태 탐색, 분자동역학, 용매, 주기계,
+실제 ORCA 구조 최적화 경로 재생을 지원한다. NEB/IRC/전이상태 탐색, 분자동역학, 용매, 주기계,
 SMILES 구조 생성, conformer 전역 탐색은 이 MVP의 범위가 아니다.
 
 ## 화면에서 할 수 있는 일
@@ -95,35 +95,28 @@ XYZ에는 결합 정보가 없으므로 import 후 결합을 다시 추론한다
 
 전체 전자 밀도와 MO는 서로 다른 field다. MO의 양/음 색은 확률의 양/음이 아니라 파동함수의 위상이다. opacity는 브라우저 속성이어서 mesh를 다시 만들지 않고, isovalue는 300 ms debounce 뒤 같은 Cube에서 contour만 다시 만든다.
 
-## 계산된 반응 경로 재생
+## 계산된 최적화 경로 재생
 
-계산 설정의 `계산 종류`에서 `반응 경로`를 선택하고 생성물 XYZ 또는 GeoORCA 프로젝트를
-불러오면, 현재 편집 구조를 반응물 snapshot으로 사용한다. 두 endpoint의 원자 수·인덱스별 원소·
-전하·다중도·전자 parity와 좌표를 검사한 뒤 반응물과 생성물을 순서대로 `r2SCAN-3c OPT`로
-최적화하고, 최적화된 endpoint 사이에서 IDPP 초기 경로를 사용하는 표준 ORCA NEB를 실행한다.
-UI의 `중간 이미지 수`는 고정된 두 endpoint를 제외한 ORCA `NImages` 값이다.
+계산 설정에서 `최적화 경로`를 선택하면 현재 편집 구조를 R0 snapshot으로 저장하고
+`r2SCAN-3c OPT`를 한 번 실행한다. 생성물 endpoint, `NImages`, IDPP, NEB 또는 IRC 입력은 받지
+않는다. 표시되는 경로는 R0에서 ORCA가 찾은 국소 최소점까지 실제로 계산한 geometry 이력이다.
 
-NEB가 정상 종료·수렴하고 현재 reaction job 폴더에 최종 `reaction_MEP_trj.xyz`가 있을 때만
-기존 manifest generator가 `data/jobs/<reaction-job-id>/reaction-path.json`을 생성한다. 성공 직후
-프런트엔드는 같은 job ID의 reaction-path API를 자동 호출하므로 JSON 파일이나 경로를 사용자가
-고를 필요가 없다. `*_MEP_ALL_trj.xyz`는 최종 경로로 사용하지 않는다. 기존 trajectory를 다시
-읽는 버튼은 복구 기능으로 남아 있으며, 표시 프레임은 실제 시간 trajectory가 아니다.
+geometry는 OPI 결과를 우선하고 `optimization_trj.xyz`, ORCA 출력 좌표 순으로 복구한다. 각 실제
+geometry에서 별도 single point를 실행하여 `step-000.gbw`, `step-001.gbw`처럼 덮어쓰지 않는
+파동함수를 보존한다. 빠른 미리보기는 r2SCAN-3c SP, 표준은 PBE0-D4/def2-SVP TightSCF SP다.
+첫 step은 `PAtom`, 이후 성공한 직전 GBW는 `MORead`로 전달한다. 중간 step SP 실패는 그 step의
+MO만 비활성화하지만 첫 step과 마지막 step 실패는 작업 실패다.
 
-반응 경로 job은 `result.json`을 만들지 않는다. 단일 구조 job은 기존대로 `result.json`에 최종
-국소 최적화 구조와 전자구조를 저장하고, 반응 경로 job은 `reaction-path.json`에 모든 실제 NEB
-image와 에너지를 저장한다.
+경로 job은 `result.json` 대신 UTF-8 `reaction-path.json`을 만든다. 새 manifest는
+`schemaVersion: 2`, `pathType: geometry-optimization`, `sourceType: orca-optimization`,
+`initialGuess: PAtom`을 기록하며 geometry가 하나뿐인 수렴 결과도 유효하다. 실제 geometry의
+에너지만 저장하고 표시용 좌표 보간에는 에너지를 붙이지 않는다. 기존 schema 1 NEB/IRC manifest는
+읽기 호환성을 유지하고, 독립 NEB 어댑터도 레거시 코드 경계에 남아 있지만 새 UI에서는 호출하지 않는다.
 
-자동 manifest는 UTF-8 JSON이며 `schemaVersion: 1`, `sourceType`, `sourceTrajectory`,
-`energyReference: first-image`, `energyUnit: hartree`, `relativeEnergyUnit: kJ/mol`, 원본 파일의
-크기·수정 시각·SHA-256과 실제 계산 이미지들을 기록한다. 명시적인 ORCA 에너지 표기가 없는
-이미지의 에너지는 `null`이며 보간해 저장하지 않는다. 원본 fingerprint나 schema가 달라지면
-지연 조회 시 원자적으로 재생성한다. 기존 version 1 수동 manifest의 eV·kJ/mol 입력 호환성도
-유지한다.
-
-`wavefunctionRef`와 `orbitalRefs`는 작업 디렉터리 기준의 존재하는 상대 경로만 허용하며 절대 경로,
-`..`, symlink를 통한 이탈을 거부한다. trajectory만으로 이미지별 GBW 대응을 추측하지 않으므로
-자동 생성 경로의 `wavefunctionRef`는 `null`이다. 이 경우에도 구조 경로는 정상 재생하고 MO
-컨트롤만 비활성화한다. 작은 수동 manifest 예시는 [테스트 fixture](tests/fixtures/reaction-path.json)에 있다.
+재생은 각 geometry의 SCF 반복 동안 좌표를 고정한 뒤 다음 geometry로 움직인다. geometry 에너지와
+현재 SCF 에너지는 별도 그래프다. 표시 프레임 간격은 물리적 시간이 아니다. MO를 선택할 때에만
+필요한 cube를 만들고, 같은 spin의 현재 추적 index ±5 후보에서 signed overlap으로 다음 MO를 찾는다.
+`wavefunctionRef`는 작업 폴더 밖으로 나갈 수 없다.
 
 백엔드는 첫 계산 지점을 기준으로 질량 가중 Kabsch 정렬을 하고, 단조 반응좌표 또는 정렬 좌표의
 누적 길이를 0..1로 정규화한다. 표시 좌표는 구간별 cubic Hermite로 만들며 두 지점뿐인 경로,

@@ -8,7 +8,7 @@ from uuid import UUID
 
 from pydantic import ValidationError
 
-from ..models import ReactionPathPlayback, ReactionPathResult
+from ..models import OrbitalMatch, ReactionPathPlayback, ReactionPathResult
 from ..surfaces.cube import read_cube
 from ..surfaces.mesh import contour_to_ply
 from .geometry import create_display_frames, image_coordinates, mass_weighted_kabsch_transform
@@ -17,10 +17,8 @@ from .importer import ReactionPathManifestGenerator
 from .orbitals import (
     GridOrbitalOverlapProvider,
     OrbitalTracker,
-    common_grid,
     interpolate_scalar_fields,
     transformed_common_grid,
-    trilinear_resample,
     trilinear_resample_transformed,
 )
 
@@ -71,28 +69,24 @@ class ReactionPathService:
         job_dir = self.jobs._job_dir(job_id)
         try:
             spin, index_text = orbital_id.rsplit(":", 1)
-            orbital_index = int(index_text)
+            int(index_text)
         except (ValueError, TypeError) as exc:
             raise ReactionPathError("INVALID_ORBITAL_ID", f"오비탈 ID 형식이 잘못되었습니다: {orbital_id}") from exc
         tracker = OrbitalTracker(orbital_id)
         phase_sign = 1
         steps: list[dict[str, object]] = []
         tracked: list[tuple[str, Path, int]] = []
-        first_ref = playback.path.images[0].orbital_refs.get(orbital_id)
-        if not first_ref:
-            raise ReactionPathError("ORBITAL_CUBE_MISSING", f"계산 지점 1에 {orbital_id} cube가 없습니다")
+        first_path = self._ensure_orbital_cube(job_dir, playback.path.images[0], orbital_id)
         if playback.path.images[0].convergence == "unconverged":
             raise ReactionPathError("SCF_UNCONVERGED", "계산 지점 1의 SCF가 수렴하지 않아 MO를 추적할 수 없습니다")
-        if not (job_dir / first_ref).is_file():
-            raise ReactionPathError("ORBITAL_CUBE_MISSING", f"계산 지점 1의 cube 파일이 없습니다: {first_ref}")
-        tracked.append((orbital_id, job_dir / first_ref, phase_sign))
+        tracked.append((orbital_id, first_path, phase_sign))
         for image_index in range(len(playback.path.images) - 1):
             left_image = playback.path.images[image_index]
             right_image = playback.path.images[image_index + 1]
-            left_ref = left_image.orbital_refs.get(tracker.current_orbital_id)
-            if not left_ref:
-                raise ReactionPathError("ORBITAL_CUBE_MISSING", f"계산 지점 {image_index + 1}에 {tracker.current_orbital_id} cube가 없습니다")
-            candidates: list[tuple[str, str]] = []
+            left_path = self._ensure_orbital_cube(
+                job_dir, left_image, tracker.current_orbital_id
+            )
+            candidates: list[tuple[str, Path]] = []
             if right_image.convergence == "unconverged":
                 match = tracker.advance(tracker.current_orbital_id, 0.0)
                 steps.append({
@@ -100,22 +94,58 @@ class ReactionPathService:
                     "match": match.model_dump(mode="json", by_alias=True), "phaseSign": phase_sign,
                 })
                 break
-            for candidate_id, reference in right_image.orbital_refs.items():
+            current_index = int(tracker.current_orbital_id.rsplit(":", 1)[1])
+            candidate_ids = (
+                [orbital.internal_id for orbital in right_image.orbitals]
+                if right_image.orbitals
+                else list(right_image.orbital_refs)
+            )
+            for candidate_id in candidate_ids:
                 try:
                     candidate_spin, candidate_index = candidate_id.rsplit(":", 1)
-                    if candidate_spin == spin and abs(int(candidate_index) - orbital_index) <= 5:
-                        if (job_dir / reference).is_file():
-                            candidates.append((candidate_id, reference))
+                    if candidate_spin == spin and abs(int(candidate_index) - current_index) <= 5:
+                        candidates.append((
+                            candidate_id,
+                            self._ensure_orbital_cube(job_dir, right_image, candidate_id),
+                        ))
                 except ValueError:
+                    continue
+                except ReactionPathError:
                     continue
             if not candidates:
                 match = tracker.advance(tracker.current_orbital_id, 0.0)
             else:
-                left_path = job_dir / left_ref
-                overlaps = [(candidate_id, self._signed_overlap(left_path, job_dir / reference)) for candidate_id, reference in candidates]
+                overlaps = [
+                    (
+                        candidate_id,
+                        self._signed_overlap(
+                            left_path,
+                            candidate_path,
+                            left_image,
+                            right_image,
+                            playback.path.elements,
+                        ),
+                    )
+                    for candidate_id, candidate_path in candidates
+                ]
                 candidate_id, signed = max(overlaps, key=lambda item: abs(item[1]))
                 match = tracker.advance(candidate_id, signed)
+                ranked = sorted((abs(value) for _, value in overlaps), reverse=True)
+                if (
+                    match.status == "matched"
+                    and len(ranked) > 1
+                    and ranked[0] - ranked[1] < 0.05
+                ):
+                    match = OrbitalMatch(
+                        leftOrbitalId=match.left_orbital_id,
+                        rightOrbitalId=match.right_orbital_id,
+                        signedOverlap=match.signed_overlap,
+                        absoluteOverlap=match.absolute_overlap,
+                        status="ambiguous",
+                    )
                 if match.status == "matched" and signed < 0:
+                    phase_sign *= -1
+                elif match.status == "ambiguous" and signed < 0:
                     phase_sign *= -1
             steps.append({
                 "leftImageIndex": image_index,
@@ -126,8 +156,11 @@ class ReactionPathService:
             if not tracker.active:
                 break
             assert match.right_orbital_id is not None
-            next_ref = right_image.orbital_refs[match.right_orbital_id]
-            tracked.append((match.right_orbital_id, job_dir / next_ref, phase_sign))
+            tracked.append((
+                match.right_orbital_id,
+                self._ensure_orbital_cube(job_dir, right_image, match.right_orbital_id),
+                phase_sign,
+            ))
         frame_surfaces = self._prepare_orbital_frames(job_dir, playback, tracked, orbital_id, isovalue)
         return {
             "orbitalId": orbital_id, "threshold": tracker.threshold, "active": tracker.active,
@@ -197,15 +230,83 @@ class ReactionPathService:
             self._cube_cache[key] = read_cube(path)
         return self._cube_cache[key]
 
-    def _signed_overlap(self, left_path: Path, right_path: Path) -> float:
+    @staticmethod
+    def _ensure_orbital_cube(job_dir: Path, image, orbital_id: str) -> Path:
+        if reference := image.orbital_refs.get(orbital_id):
+            path = job_dir / reference
+            if path.is_file():
+                return path
+        if not image.wavefunction_ref:
+            raise ReactionPathError(
+                "STEP_WAVEFUNCTION_MISSING",
+                f"geometry step {image.index}의 wavefunction이 없습니다",
+            )
+        try:
+            spin, index_text = orbital_id.rsplit(":", 1)
+            orbital_index = int(index_text)
+        except ValueError as exc:
+            raise ReactionPathError("INVALID_ORBITAL_ID", orbital_id) from exc
+        gbw = (job_dir / image.wavefunction_ref).resolve()
+        try:
+            gbw.relative_to(job_dir.resolve())
+        except ValueError as exc:
+            raise ReactionPathError("PATH_OUTSIDE_JOB", str(gbw)) from exc
+        if not gbw.is_file():
+            raise ReactionPathError("STEP_WAVEFUNCTION_MISSING", gbw.name)
+        cube_path = job_dir / f"{gbw.stem}.mo.{spin}.{orbital_index}.cube"
+        if cube_path.is_file():
+            return cube_path
+        try:
+            from opi.output.core import Output
+
+            output = Output(gbw.stem, working_dir=job_dir, version_check=False, parse=False)
+            output.collect_gbw_json_files()
+            cube_output = output.plot_mo(
+                orbital_index,
+                operator=1 if spin == "beta" else 0,
+                resolution=40,
+                gbw_type="gbw",
+                timeout=600,
+            )
+            cube = getattr(cube_output, "cube", None)
+            if not cube:
+                raise RuntimeError("orca_plot returned no cube")
+            cube_path.write_text(cube, encoding="utf-8")
+        except Exception as exc:
+            raise ReactionPathError(
+                "ORBITAL_TRACKING_FAILED",
+                f"geometry step {image.index}의 {orbital_id} cube 생성 실패: {exc}",
+            ) from exc
+        return cube_path
+
+    def _signed_overlap(
+        self, left_path: Path, right_path: Path, left_image, right_image, elements: list[str]
+    ) -> float:
         key = (left_path, left_path.stat().st_mtime_ns, right_path, right_path.stat().st_mtime_ns)
         if key in self._overlap_cache:
             return self._overlap_cache[key]
         left = self._load_cube(left_path)
         right = self._load_cube(right_path)
-        grid = common_grid([left, right])
-        left_on_grid = grid.__class__(grid.origin, grid.axes, grid.shape, trilinear_resample(left, grid))
-        right_on_grid = grid.__class__(grid.origin, grid.axes, grid.shape, trilinear_resample(right, grid))
+        reference = image_coordinates(left_image)
+        transforms = [
+            mass_weighted_kabsch_transform(reference, reference, elements),
+            mass_weighted_kabsch_transform(
+                reference, image_coordinates(right_image), elements
+            ),
+        ]
+        grid = transformed_common_grid([left, right], transforms)
+        left_on_grid = grid.__class__(
+            grid.origin,
+            grid.axes,
+            grid.shape,
+            trilinear_resample_transformed(left, grid, transforms[0]),
+        )
+        right_on_grid = grid.__class__(
+            grid.origin,
+            grid.axes,
+            grid.shape,
+            trilinear_resample_transformed(right, grid, transforms[1]),
+        )
         overlap = GridOrbitalOverlapProvider().compute_signed_overlap(left_on_grid, right_on_grid)
         self._overlap_cache[key] = overlap
         return overlap
@@ -216,8 +317,9 @@ class ReactionPathService:
         if unit not in {"hartree", "kj/mol", "eV"}:
             raise ReactionPathError("ENERGY_UNIT_REQUIRED", "energyUnit는 hartree, kj/mol 또는 eV여야 합니다")
         raw_images = raw.get("images")
-        if not isinstance(raw_images, list) or len(raw_images) < 2:
-            raise ReactionPathError("TOO_FEW_IMAGES", "반응 경로에는 계산 지점이 두 개 이상 필요합니다")
+        minimum = 1 if raw.get("schemaVersion") == 2 else 2
+        if not isinstance(raw_images, list) or len(raw_images) < minimum:
+            raise ReactionPathError("TOO_FEW_IMAGES", f"경로에는 계산 지점이 {minimum}개 이상 필요합니다")
         energies: list[float | None] = []
         for item in raw_images:
             if not isinstance(item, dict):
@@ -262,7 +364,11 @@ class ReactionPathService:
         except ValidationError as exc:
             raise ReactionPathError("INVALID_REACTION_PATH_MANIFEST", str(exc)) from exc
         self._validate_images(job_dir, result)
-        frames = create_display_frames(result.images, result.elements)
+        frames = create_display_frames(
+            result.images,
+            result.elements,
+            interpolate_energy=result.schema_version == 1,
+        )
         return ReactionPathPlayback(path=result, displayFrames=frames)
 
     @staticmethod

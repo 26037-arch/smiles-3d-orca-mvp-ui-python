@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Activity, Atom as AtomIcon, CheckCircle2, ChevronDown, CircleAlert, Eye, EyeOff, FlaskConical, FolderOpen, Layers3, Plus, RefreshCcw, Settings2, Trash2 } from 'lucide-react'
+import { Activity, Atom as AtomIcon, CheckCircle2, ChevronDown, CircleAlert, Eye, EyeOff, FlaskConical, Layers3, Plus, RefreshCcw, Settings2, Trash2 } from 'lucide-react'
 import { api } from '../api/client'
 import { ELEMENTS, normalizeElement } from '../chem/elements'
 import { createSurfaceLayer, frontierOrbitals, orbitalOptionLabel, selectedOrbitalIdForBrowser, surfaceRequestForLayer, toggleSurfaceLayer } from '../chem/orbitals'
 import { AO_PAGE_SIZE, appendCompositionItems, createBasisSurfaceLayer, deselectIncomingBasis, initialBasisSelection, isCurrentAORequest } from '../chem/aoComposition'
-import { productProjectFromXyz, validateReactionEndpoints } from '../chem/reactionEndpoints'
-import { parseProjectJson } from '../chem/serialization'
 import { useProjectStore, visibleProject } from '../store/projectStore'
 import type { BasisContribution, Capabilities, Orbital, OrbitalComposition, SurfaceLayer, Vec3 } from '../types'
 
@@ -32,27 +30,19 @@ function CalculationSettings({ capabilities }: { capabilities?: Capabilities }) 
   const setNotice = useProjectStore(s => s.setNotice); const setError = useProjectStore(s => s.setError)
   const calculationKind = useProjectStore(s => s.calculationKind); const setCalculationKind = useProjectStore(s => s.setCalculationKind)
   const reactionStatus = useProjectStore(s => s.reactionStatus); const reactionError = useProjectStore(s => s.reactionError)
-  const reactionProduct = useProjectStore(s => s.reactionProduct); const setReactionProduct = useProjectStore(s => s.setReactionProduct)
-  const reactionEndpointView = useProjectStore(s => s.reactionEndpointView); const setReactionEndpointView = useProjectStore(s => s.setReactionEndpointView)
-  const reactionImageCount = useProjectStore(s => s.reactionImageCount); const setReactionImageCount = useProjectStore(s => s.setReactionImageCount)
   const result = useProjectStore(s => s.result)
   const pathRequest = useRef<AbortController | undefined>(undefined)
-  const productXyzInput = useRef<HTMLInputElement>(null)
-  const productProjectInput = useRef<HTMLInputElement>(null)
   const [presets, setPresets] = useState<any[]>([]); useEffect(() => { api.presets().then(setPresets).catch(() => {}) }, [])
   const [orcaPath, setOrcaPath] = useState(capabilities?.orca.path ?? '')
   useEffect(() => setOrcaPath(capabilities?.orca.path ?? ''), [capabilities?.orca.path])
   const electrons = project.atoms.reduce((sum, atom) => sum + ELEMENTS[atom.element].atomicNumber, 0) - project.totalCharge
   const parityOk = electrons % 2 === (project.multiplicity - 1) % 2
-  const endpointError = calculationKind === 'reaction-path'
-    ? validateReactionEndpoints(project, reactionProduct)
-    : undefined
   const savePath = async () => { try { await api.setOrcaPath(orcaPath.trim() || null); setNotice('ORCA 경로를 로컬 설정에 저장했습니다.'); window.setTimeout(() => window.location.reload(), 400) } catch (e) { setError((e as Error).message) } }
   useEffect(() => () => pathRequest.current?.abort(), [])
   const reactionJobId = project.lastCalculationId ?? result?.job_id
   const loadReactionPath = useCallback(async () => {
     const jobId = reactionJobId
-    if (!jobId) return setError('반응 경로를 읽을 계산 작업이 없습니다.')
+    if (!jobId) return setError('최적화 경로를 읽을 계산 작업이 없습니다.')
     pathRequest.current?.abort()
     const controller = new AbortController(); pathRequest.current = controller
     useProjectStore.getState().beginReactionPathLoad()
@@ -65,37 +55,20 @@ function CalculationSettings({ capabilities }: { capabilities?: Capabilities }) 
       useProjectStore.getState().failReactionPath((error as Error).message)
     }
   }, [reactionJobId, setError])
-  const loadProduct = async (file?: File, kind?: 'xyz' | 'project') => {
-    if (!file) return
-    try {
-      const text = await file.text()
-      const product = kind === 'xyz'
-        ? productProjectFromXyz(project, text, file.name.replace(/\.xyz$/i, ''))
-        : parseProjectJson(text)
-      setReactionProduct(product)
-      setNotice(`${file.name}을 생성물 endpoint로 불러왔습니다.`)
-    } catch (error) {
-      setError((error as Error).message)
-    }
-  }
   return <div className="settings-grid">
     <label className="full">계산 종류<div className="calculation-kind" role="group" aria-label="계산 종류">
       <button className={calculationKind === 'single' ? 'active' : ''} onClick={() => { pathRequest.current?.abort(); setCalculationKind('single') }}>단일 구조</button>
-      <button className={calculationKind === 'reaction-path' ? 'active' : ''} onClick={() => setCalculationKind('reaction-path')}>반응 경로</button>
+      <button className={calculationKind === 'reaction-path' ? 'active' : ''} onClick={() => setCalculationKind('reaction-path')}>최적화 경로</button>
     </div></label>
     <label>전체 전하<input type="number" min="-20" max="20" value={project.totalCharge} onChange={e => update({ totalCharge: Number(e.target.value) })} /></label>
     <label>스핀 다중도<input type="number" min="1" max="20" value={project.multiplicity} onChange={e => update({ multiplicity: Number(e.target.value) })} /></label>
     <label className="full">계산 프리셋<select value={project.calculationPreset} onChange={e => update({ calculationPreset: e.target.value })}>{presets.map(p => <option key={p.id} value={p.id}>{p.name} · 비용 {p.cost}</option>)}</select></label>
     {calculationKind === 'reaction-path' && <div className="reaction-import full">
-      <div className="endpoint-card"><strong>반응물</strong><span>현재 편집 중인 구조 · {project.atoms.length}개 원자</span><button className={reactionEndpointView === 'reactant' ? 'active' : ''} onClick={() => setReactionEndpointView('reactant')}><Eye /> 반응물 보기</button></div>
-      <div className="endpoint-card"><strong>생성물</strong><span>{reactionProduct ? `${reactionProduct.name} · ${reactionProduct.atoms.length}개 원자` : '선택되지 않음'}</span><div><button onClick={() => productXyzInput.current?.click()}><FolderOpen /> XYZ 불러오기</button><button onClick={() => productProjectInput.current?.click()}><FolderOpen /> GeoORCA 프로젝트</button></div><input ref={productXyzInput} hidden type="file" accept=".xyz" onChange={event => void loadProduct(event.target.files?.[0], 'xyz')} /><input ref={productProjectInput} hidden type="file" accept=".json,.geoorca.json" onChange={event => void loadProduct(event.target.files?.[0], 'project')} /></div>
-      {reactionProduct && <div className="endpoint-preview-actions"><button className={reactionEndpointView === 'reactant' ? 'active' : ''} onClick={() => setReactionEndpointView('reactant')}>반응물 보기</button><button className={reactionEndpointView === 'product' ? 'active' : ''} onClick={() => setReactionEndpointView('product')}>생성물 보기</button><button className={reactionEndpointView === 'overlay' ? 'active' : ''} onClick={() => setReactionEndpointView('overlay')}>겹쳐 보기</button><button className="danger-ghost" onClick={() => setReactionProduct()}>생성물 제거</button></div>}
-      <label className="endpoint-images">중간 이미지 수<input type="number" min="1" max="32" value={reactionImageCount} onChange={event => setReactionImageCount(Number(event.target.value))} /></label>
-      <p className="help">ORCA NImages 값입니다. 고정된 반응물·생성물 endpoint는 이 수에 포함되지 않습니다. 초기 경로는 IDPP로 생성합니다.</p>
-      <p className="help">XYZ에는 전하·다중도가 없으므로 현재 설정({project.totalCharge}, {project.multiplicity})을 사용합니다.</p>
-      <div className={`validation-line ${endpointError ? 'bad' : 'ok'}`}>{endpointError ? <CircleAlert /> : <CheckCircle2 />}{endpointError ?? 'endpoint 원자 순서·전하·다중도 검증 완료'}</div>
-      {reactionJobId && <button className="wide" disabled={reactionStatus === 'loading-path'} onClick={() => void loadReactionPath()}>{reactionStatus === 'loading-path' ? '경로 찾는 중…' : '현재 작업에서 반응 경로 다시 불러오기'}</button>}
-      <p className="help">계산 완료 후 reaction-path.json은 자동으로 생성·로드됩니다.</p>
+      <div className="endpoint-card"><strong>R0 입력 구조</strong><span>현재 편집 중인 구조 · {project.atoms.length}개 원자</span></div>
+      <p className="help">R0에서 r2SCAN-3c 구조 최적화를 실행하고 ORCA가 실제로 계산한 geometry와 SCF 반복만 표시합니다. NEB·IRC·IDPP 계산이 아닙니다.</p>
+      <p className="help">각 geometry는 선택한 프리셋으로 별도 single point를 수행하며, 처음에는 PAtom, 이후에는 직전 GBW를 읽습니다.</p>
+      {reactionJobId && <button className="wide" disabled={reactionStatus === 'loading-path'} onClick={() => void loadReactionPath()}>{reactionStatus === 'loading-path' ? '경로 찾는 중…' : '현재 작업에서 최적화 경로 다시 불러오기'}</button>}
+      <p className="help">계산 완료 후 schema 2 reaction-path.json을 자동 생성·로드합니다.</p>
       {reactionError && <p className="inline-error">{reactionError}</p>}
     </div>}
     <div className={`validation-line full ${parityOk ? 'ok' : 'bad'}`}>{parityOk ? <CheckCircle2 /> : <CircleAlert />}전자 수 {electrons} · {parityOk ? '다중도 parity 일치' : '전하·다중도 parity 불일치'}</div>
@@ -116,11 +89,12 @@ function SurfaceControl({ layer }: { layer: SurfaceLayer }) {
   const result = useProjectStore(s => s.result); const upsert = useProjectStore(s => s.upsertSurface); const remove = useProjectStore(s => s.removeSurface)
   const [isovalue, setIso] = useState(layer.isovalue)
   useEffect(() => {
-    if (!result || !layer.visible) return
+    if (!layer.visible) return
     if (layer.reactionFrame) {
       if (Math.abs(layer.isovalue - isovalue) > 1e-12) upsert({ ...layer, isovalue })
       return
     }
+    if (!result) return
     const timer = window.setTimeout(async () => {
       const pending = { ...layer, isovalue, loading: true, error: undefined }; upsert(pending)
       try { const response = await api.surface(result.job_id, surfaceRequestForLayer(pending)); upsert({ ...pending, loading: false, meshUrls: response.mesh_urls, cacheHit: response.cache_hit }) }
@@ -138,13 +112,21 @@ function SurfacesPanel() {
   const result = useProjectStore(s => s.result); const layers = useProjectStore(s => s.surfaces); const upsert = useProjectStore(s => s.upsertSurface); const selected = useProjectStore(s => s.selectedOrbital); const setSelected = useProjectStore(s => s.setSelectedOrbital); const setError = useProjectStore(s => s.setError)
   const calculationKind = useProjectStore(s => s.calculationKind)
   const reactionPath = useProjectStore(s => s.reactionPath)
-  const reactionHasWavefunctions = reactionPath?.path.images.every(image => Object.keys(image.orbitalRefs).length > 0) ?? false
+  const reactionFrameIndex = useProjectStore(s => s.reactionFrameIndex)
+  const displayFrame = reactionPath?.displayFrames[reactionFrameIndex]
+  const reactionImage = displayFrame ? reactionPath?.path.images[displayFrame.leftImageIndex] : undefined
+  const reactionOrbitals = reactionImage?.orbitals
+  const availableOrbitals = useMemo(
+    () => calculationKind === 'reaction-path' ? reactionOrbitals ?? [] : result?.orbitals ?? [],
+    [calculationKind, reactionOrbitals, result?.orbitals],
+  )
+  const reactionHasWavefunctions = Boolean(reactionPath?.path.images[0]?.wavefunctionRef)
   const [extraOrbitalId, setExtraOrbitalId] = useState('')
-  const frontier = useMemo(() => frontierOrbitals(result?.orbitals ?? [], result?.homo_internal_id), [result])
-  const extraOrbital = result?.orbitals.find(orbital => orbital.internal_id === extraOrbitalId)
+  const frontier = useMemo(() => frontierOrbitals(availableOrbitals, result?.homo_internal_id), [availableOrbitals, result?.homo_internal_id])
+  const extraOrbital = availableOrbitals.find(orbital => orbital.internal_id === extraOrbitalId)
   useEffect(() => {
-    setExtraOrbitalId(selectedOrbitalIdForBrowser(result?.orbitals ?? [], selected))
-  }, [result?.job_id, result?.orbitals, selected])
+    setExtraOrbitalId(selectedOrbitalIdForBrowser(availableOrbitals, selected))
+  }, [availableOrbitals, result?.job_id, selected])
   const addLayer = (orbital?: Orbital) => {
     if (orbital) setSelected(orbital.internal_id)
     if (calculationKind === 'reaction-path' && orbital) return
@@ -153,9 +135,9 @@ function SurfacesPanel() {
     if (update.error) return setError(update.error)
     if (update.layer) upsert(update.layer)
   }
-  if (!result) return <p className="empty-state">계산 결과가 없으므로 표면을 만들 수 없습니다. ORCA가 없으면 명시적인 데모 결과로 UI를 시험할 수 있습니다.</p>
+  if (!result && !reactionPath) return <p className="empty-state">계산 결과가 없으므로 표면을 만들 수 없습니다. ORCA가 없으면 명시적인 데모 결과로 UI를 시험할 수 있습니다.</p>
   const reactionMoDisabled = calculationKind === 'reaction-path' && !reactionHasWavefunctions
-  return <><button className="wide surface-add" onClick={() => addLayer()}><Layers3 /> 전체 전자 밀도 켜기/끄기</button><p className="help">MO의 ± 색은 확률 부호가 아니라 파동함수의 위상입니다. 전체 전자 밀도는 별도 scalar field입니다.</p>{reactionMoDisabled && <p className="inline-error">이 반응 경로에는 이미지별 파동함수 결과가 없습니다. 분자 구조 경로만 재생할 수 있습니다.</p>}<div className="mo-list-heading">Frontier orbitals</div><div className="orbital-chips">{frontier.map(o => <button key={o.internal_id} disabled={reactionMoDisabled} className={selected === o.internal_id ? 'active' : ''} onClick={() => addLayer(o)}>{o.spin === 'alpha' ? 'α ' : o.spin === 'beta' ? 'β ' : ''}{o.label ?? `MO ${o.display_number}`}<small>{(o.energy_hartree * 27.211386).toFixed(2)} eV</small></button>)}</div><div className="mo-browser"><strong>다른 MO 불러오기</strong><select aria-label="MO 선택" disabled={reactionMoDisabled} value={extraOrbitalId} onChange={event => { setExtraOrbitalId(event.target.value); setSelected(event.target.value || undefined) }}><option value="">MO 선택</option>{result.orbitals.map(orbital => <option key={orbital.internal_id} value={orbital.internal_id}>{orbitalOptionLabel(orbital)}</option>)}</select>{extraOrbital && <div className="mo-selection"><span>선택된 MO <b>{extraOrbital.spin === 'alpha' ? 'α ' : extraOrbital.spin === 'beta' ? 'β ' : ''}MO {extraOrbital.display_number}{extraOrbital.label ? ` · ${extraOrbital.label}` : ''}</b></span><span>에너지 <b>{(extraOrbital.energy_hartree * 27.211386245988).toFixed(2)} eV</b></span><span>점유수 <b>{extraOrbital.occupancy.toFixed(1)}</b></span><span>Spin <b>{extraOrbital.spin}</b></span></div>}<button className="wide" disabled={!extraOrbital || reactionMoDisabled} onClick={() => addLayer(extraOrbital)}><Plus /> 표면 추가</button></div>{layers.filter(layer => layer.field !== 'ao_component').map(layer => <SurfaceControl key={layer.key} layer={layer} />)}</>
+  return <><button className="wide surface-add" disabled={calculationKind === 'reaction-path'} onClick={() => addLayer()}><Layers3 /> 전체 전자 밀도 켜기/끄기</button><p className="help">MO의 ± 색은 확률 부호가 아니라 파동함수의 위상입니다. 최적화 경로 MO cube는 선택 시 지연 생성됩니다.</p>{reactionMoDisabled && <p className="inline-error">이 경로에는 첫 geometry의 파동함수가 없어 MO 추적을 시작할 수 없습니다.</p>}<div className="mo-list-heading">Frontier orbitals</div><div className="orbital-chips">{frontier.map(o => <button key={o.internal_id} disabled={reactionMoDisabled} className={selected === o.internal_id ? 'active' : ''} onClick={() => addLayer(o)}>{o.spin === 'alpha' ? 'α ' : o.spin === 'beta' ? 'β ' : ''}{o.label ?? `MO ${o.display_number}`}<small>{(o.energy_hartree * 27.211386).toFixed(2)} eV</small></button>)}</div><div className="mo-browser"><strong>다른 MO 불러오기</strong><select aria-label="MO 선택" disabled={reactionMoDisabled} value={extraOrbitalId} onChange={event => { setExtraOrbitalId(event.target.value); setSelected(event.target.value || undefined) }}><option value="">MO 선택</option>{availableOrbitals.map(orbital => <option key={orbital.internal_id} value={orbital.internal_id}>{orbitalOptionLabel(orbital)}</option>)}</select>{extraOrbital && <div className="mo-selection"><span>선택된 MO <b>{extraOrbital.spin === 'alpha' ? 'α ' : extraOrbital.spin === 'beta' ? 'β ' : ''}MO {extraOrbital.display_number}{extraOrbital.label ? ` · ${extraOrbital.label}` : ''}</b></span><span>에너지 <b>{(extraOrbital.energy_hartree * 27.211386245988).toFixed(2)} eV</b></span><span>점유수 <b>{extraOrbital.occupancy.toFixed(1)}</b></span><span>Spin <b>{extraOrbital.spin}</b></span></div>}<button className="wide" disabled={!extraOrbital || reactionMoDisabled} onClick={() => addLayer(extraOrbital)}><Plus /> 표면 추가</button></div>{layers.filter(layer => layer.field !== 'ao_component').map(layer => <SurfaceControl key={layer.key} layer={layer} />)}</>
 }
 
 function AOCompositionPanel({ capabilities }: { capabilities?: Capabilities }) {

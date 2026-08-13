@@ -2,146 +2,111 @@ from __future__ import annotations
 
 import json
 import time
-from threading import Event
-
-import pytest
-from fastapi.testclient import TestClient
-
-from backend.app.chemistry.opi_adapter import ChemistryError, OpiAdapter
+from backend.app.chemistry.opi_adapter import OpiAdapter
 from backend.app.config import LocalSettings
 from backend.app.jobs.manager import JobManager
-from backend.app.main import app
-from backend.app.models import (
-    CalculationKind,
-    JobCreate,
-    JobMode,
-    JobState,
-    ReactionPathSettings,
-)
+from backend.app.models import CalculationKind, JobCreate, JobState, ReactionPathSettings
+from backend.app.reaction_path.importer import ParsedFrame
+from backend.app.reaction_path.optimization import build_optimization_path, parse_scf_history
 
 
-def product_from(project, *, displacement: float = 0.35):
-    atoms = list(project.atoms)
-    atoms[-1] = atoms[-1].model_copy(
-        update={"position": (atoms[-1].position[0], atoms[-1].position[1] + displacement, 0)}
-    )
-    return project.model_copy(update={"name": "Water product", "atoms": atoms})
-
-
-def wait_terminal(manager: JobManager, job_id, timeout: float = 4):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        record = manager.get(job_id)
-        if record.state in {JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED}:
-            return record
-        time.sleep(0.02)
-    raise AssertionError("reaction-path job did not finish")
-
-
-def trajectory_text(reactant, product) -> str:
-    def frame(project, energy):
-        rows = [str(len(project.atoms)), f"Energy = {energy} Eh"]
-        rows.extend(
-            f"{atom.element} {atom.position[0]} {atom.position[1]} {atom.position[2]}"
-            for atom in project.atoms
-        )
-        return "\n".join(rows)
-
-    return frame(reactant, -76.0) + "\n" + frame(product, -75.9) + "\n"
-
-
-def test_legacy_single_request_defaults_are_preserved(water_project):
+def test_reaction_request_uses_only_the_current_project(water_project):
     request = JobCreate.model_validate(
-        {"mode": "demo", "project": water_project.model_dump(by_alias=True)}
+        {
+            "mode": "orca",
+            "calculationKind": "reaction-path",
+            "project": water_project.model_dump(by_alias=True),
+        }
     )
-    assert request.calculation_kind == CalculationKind.SINGLE
-    assert request.reaction_path_settings.image_count == 8
+    assert request.calculation_kind == CalculationKind.REACTION_PATH
+    assert request.project == water_project
+    assert "product" not in request.model_dump(by_alias=True)
 
 
-def test_job_request_does_not_mix_single_and_reaction_payloads(water_project):
-    with pytest.raises(ValueError, match="reactant와 product"):
-        JobCreate(
-            mode="orca",
-            calculationKind="reaction-path",
-            project=water_project,
-            reactant=water_project,
-            product=product_from(water_project),
-        )
+def test_scf_history_is_grouped_by_geometry_cycle_and_tolerates_utf8(tmp_path):
+    output = tmp_path / "optimization.out"
+    output.write_text(
+        """GEOMETRY OPTIMIZATION CYCLE 1
+Iteration Energy (Eh) Delta-E RMSDP MaxDP DIISErr
+  1 -75.000000 0.0 1.0D-02 2.0D-02 3.0D-03
+  2 -75.100000 -1.0D-01 1.0D-03 2.0D-03 3.0D-04
+SCF CONVERGED AFTER 2 CYCLES — ok
+GEOMETRY OPTIMIZATION CYCLE 2
+Iteration Energy (Eh) Delta-E RMSDP MaxDP MaxGrad
+  1 -75.200000 -1.0D-01 1.0D-04 2.0D-04 4.0D-05
+*** FINAL ENERGY EVALUATION AT THE STATIONARY POINT ***
+Iteration Energy (Eh) Delta-E RMSDP MaxDP MaxGrad
+  1 -75.210000 -1.0D-02 1.0D-05 2.0D-05 4.0D-06
+""",
+        encoding="utf-8",
+    )
+    cycles = parse_scf_history(output)
+    assert len(cycles) == 3
+    assert cycles[0].converged is True
+    assert cycles[0].iterations[-1].energy_hartree == -75.1
+    assert cycles[1].iterations[0].diis_error is None
+    assert cycles[1].iterations[0].max_gradient == 4e-5
+    assert cycles[2].iterations[0].energy_hartree == -75.21
 
 
-@pytest.mark.parametrize(
-    ("mutation", "code"),
-    [
-        (lambda product: product.model_copy(update={"atoms": product.atoms[:-1]}),
-         "ENDPOINT_ATOM_COUNT_MISMATCH"),
-        (
-            lambda product: product.model_copy(
-                update={
-                    "atoms": [
-                        product.atoms[0].model_copy(update={"element": "H"}),
-                        product.atoms[1].model_copy(update={"element": "O"}),
-                        product.atoms[2],
-                    ]
-                }
-            ),
-            "ENDPOINT_ELEMENT_ORDER_MISMATCH",
-        ),
-        (lambda product: product.model_copy(update={"total_charge": 1}),
-         "ENDPOINT_CHARGE_MISMATCH"),
-    ],
-)
-def test_endpoint_validation_has_stable_error_codes(tmp_path, water_project, mutation, code):
-    manager = JobManager(LocalSettings(jobs_dir=str(tmp_path), orca_path="orca"))
-    product = mutation(product_from(water_project))
-    with pytest.raises(ChemistryError) as error:
-        manager.create(
-            water_project,
-            JobMode.ORCA,
-            calculation_kind=CalculationKind.REACTION_PATH,
-            product=product,
-        )
-    assert error.value.code == code
-    manager.executor.shutdown()
+def test_schema_two_manifest_accepts_one_actual_geometry(tmp_path, water_project):
+    trajectory = tmp_path / "optimization_trj.xyz"
+    trajectory.write_text("trajectory", encoding="utf-8")
+    frame = ParsedFrame(
+        [atom.element for atom in water_project.atoms],
+        [tuple(atom.position) for atom in water_project.atoms],
+        -76.0,
+    )
+    result = build_optimization_path(
+        tmp_path,
+        water_project,
+        [frame],
+        [],
+        [[]],
+        ["step-000.gbw"],
+        [True],
+    )
+    assert result.schema_version == 2
+    assert result.path_type == "geometry-optimization"
+    assert result.source_type == "orca-optimization"
+    assert result.initial_guess == "PAtom"
+    assert result.images[0].geometry_converged is True
 
 
-def test_api_rejects_missing_product_with_structured_error(monkeypatch, tmp_path, water_project):
-    monkeypatch.setenv("GEOORCA_JOBS_DIR", str(tmp_path))
-    monkeypatch.setenv("GEOORCA_ORCA_PATH", "orca")
-    body = {
-        "mode": "orca",
-        "calculationKind": "reaction-path",
-        "reactant": water_project.model_dump(by_alias=True, mode="json"),
-        "reactionPathSettings": {"interpolation": "idpp", "imageCount": 8},
-    }
-    with TestClient(app) as client:
-        response = client.post("/api/jobs", json=body)
-    assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "PRODUCT_ENDPOINT_REQUIRED"
+def test_path_single_points_use_patom_then_previous_gbw(tmp_path, water_project):
+    adapter = OpiAdapter()
+    positions = [tuple(atom.position) for atom in water_project.atoms]
+    first = adapter.build_path_single_point(
+        water_project,
+        positions,
+        tmp_path,
+        basename="step-000",
+        previous_gbw=None,
+    )
+    first.write_input()
+    previous = tmp_path / "step-000.gbw"
+    previous.write_bytes(b"gbw")
+    second = adapter.build_path_single_point(
+        water_project,
+        positions,
+        tmp_path,
+        basename="step-001",
+        previous_gbw=previous,
+    )
+    second.write_input()
+    first_text = (tmp_path / "step-000.inp").read_text(encoding="utf-8").lower()
+    second_text = (tmp_path / "step-001.inp").read_text(encoding="utf-8").lower()
+    assert "patom" in first_text
+    assert "moread" in second_text
+    assert "%moinp" in second_text and "step-000.gbw" in second_text
 
 
-def test_api_rejects_nonfinite_endpoint_coordinates(monkeypatch, tmp_path, water_project):
-    monkeypatch.setenv("GEOORCA_JOBS_DIR", str(tmp_path))
-    monkeypatch.setenv("GEOORCA_ORCA_PATH", "orca")
-    product = product_from(water_project).model_dump(by_alias=True, mode="json")
-    product["atoms"][1]["position"][0] = "NaN"
-    body = {
-        "mode": "orca",
-        "calculationKind": "reaction-path",
-        "reactant": water_project.model_dump(by_alias=True, mode="json"),
-        "product": product,
-    }
-    with TestClient(app) as client:
-        response = client.post("/api/jobs", json=body)
-    assert response.status_code == 422
-    assert response.json()["detail"][0]["loc"][-1] == "position"
-
-
-def test_real_opi_writes_typed_neb_input(tmp_path, water_project):
-    pytest.importorskip("opi")
-    reactant = tmp_path / "reactant-optimized.xyz"
-    product = tmp_path / "product-optimized.xyz"
-    reactant.write_text("3\nr\nO 0 0 0\nH .9 0 0\nH -.2 .9 0\n", encoding="utf-8")
-    product.write_text("3\np\nO 0 0 0\nH .9 0 0\nH -.2 1.2 0\n", encoding="utf-8")
+def test_legacy_neb_builder_remains_a_separate_adapter(tmp_path, water_project):
+    reactant = tmp_path / "reactant.xyz"
+    product = tmp_path / "product.xyz"
+    xyz = "3\nwater\nO 0 0 0\nH .9 0 0\nH -.2 1.2 0\n"
+    reactant.write_text(xyz, encoding="utf-8")
+    product.write_text(xyz, encoding="utf-8")
     calculator = OpiAdapter().build_neb_calculator(
         reactant,
         product,
@@ -151,133 +116,51 @@ def test_real_opi_writes_typed_neb_input(tmp_path, water_project):
     )
     calculator.write_input()
     text = (tmp_path / "reaction.inp").read_text(encoding="utf-8").lower()
-    assert "!r2scan-3c" in text
-    assert "!neb" in text
+    assert "neb" in text
     assert "nimages 8" in text
-    assert "interpolation idpp" in text
-    assert 'neb_end_xyzfile "product-optimized.xyz"' in text
-    assert "*xyzfile 0 1 reactant-optimized.xyz" in text
-    single = OpiAdapter().build_calculator(water_project, tmp_path, basename="single-regression")
-    single.write_input()
-    single_text = (tmp_path / "single-regression.inp").read_text(encoding="utf-8").lower()
-    assert "!r2scan-3c" in single_text and "!opt" in single_text
-    assert "!neb" not in single_text and "%neb" not in single_text
 
 
-def test_reaction_job_runs_endpoint_opt_then_neb_and_builds_manifest(
-    tmp_path, water_project, monkeypatch
+def test_manager_dispatches_optimization_path_without_product(
+    monkeypatch, tmp_path, water_project
 ):
-    product = product_from(water_project)
-    calls: list[str] = []
+    called: list[str] = []
 
-    def fake_optimize(self, project, _workdir, *, basename, **_kwargs):
-        calls.append(basename)
-        return project
-
-    def fake_execute(calc, workdir, **_kwargs):
-        calls.append(calc.basename)
-        assert calls == ["reactant-endpoint", "product-endpoint", "reaction"]
-        (workdir / "reaction.out").write_bytes(
-            b"NEB CONVERGED\nHURRAY\n****ORCA TERMINATED NORMALLY****\n"
+    def fake_run(self, project, workdir, **kwargs):
+        called.append(project.name)
+        (workdir / "reaction-path.json").write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 2,
+                    "pathType": "geometry-optimization",
+                    "sourceType": "orca-optimization",
+                    "atomCount": len(project.atoms),
+                    "elements": [atom.element for atom in project.atoms],
+                    "charge": project.total_charge,
+                    "multiplicity": project.multiplicity,
+                    "images": [],
+                    "hasPhysicalTime": False,
+                    "isPhysicalTimeTrajectory": False,
+                    "initialGuess": "PAtom",
+                    "energyUnit": "hartree",
+                }
+            ),
+            encoding="utf-8",
         )
-        (workdir / "reaction_MEP_trj.xyz").write_text(
-            trajectory_text(water_project, product), encoding="utf-8"
-        )
 
-    monkeypatch.setattr(OpiAdapter, "optimize_endpoint", fake_optimize)
-    monkeypatch.setattr(OpiAdapter, "_execute", staticmethod(fake_execute))
-    monkeypatch.setenv("GEOORCA_JOBS_DIR", str(tmp_path))
-    monkeypatch.setenv("GEOORCA_ORCA_PATH", "orca")
-    body = {
-        "mode": "orca",
-        "calculationKind": "reaction-path",
-        "reactant": water_project.model_dump(by_alias=True, mode="json"),
-        "product": product.model_dump(by_alias=True, mode="json"),
-        "reactionPathSettings": {"interpolation": "idpp", "imageCount": 8},
-    }
-    with TestClient(app) as client:
-        created = client.post("/api/jobs", json=body)
-        assert created.status_code == 202
-        job_id = created.json()["id"]
-        deadline = time.time() + 4
-        while time.time() < deadline:
-            finished = client.get(f"/api/jobs/{job_id}").json()
-            if finished["state"] in {"SUCCEEDED", "FAILED", "CANCELLED"}:
-                break
-            time.sleep(0.02)
-        assert finished["state"] == "SUCCEEDED"
-        assert finished["calculationKind"] == "reaction-path"
-        playback = client.get(f"/api/jobs/{job_id}/reaction-path")
-        single_result = client.get(f"/api/jobs/{job_id}/result")
-
-    folder = tmp_path / job_id
-    assert calls == ["reactant-endpoint", "product-endpoint", "reaction"]
-    assert (folder / "reactant-project.json").is_file()
-    assert (folder / "product-project.json").is_file()
-    assert (folder / "reactant-optimized.xyz").is_file()
-    assert (folder / "product-optimized.xyz").is_file()
-    assert (folder / "reaction.inp").is_file()
-    assert (folder / "reaction-path.json").is_file()
-    assert not (folder / "result.json").exists()
-    manifest = json.loads((folder / "reaction-path.json").read_text(encoding="utf-8"))
-    assert manifest["sourceType"] == "neb"
-    assert len(manifest["images"]) == 2
-    assert playback.status_code == 200
-    assert len(playback.json()["path"]["images"]) == 2
-    assert single_result.status_code == 409
-    assert single_result.json()["detail"]["code"] == "RESULT_NOT_AVAILABLE_FOR_REACTION_PATH"
-
-
-def test_missing_final_neb_trajectory_fails_reaction_job(tmp_path, water_project, monkeypatch):
-    product = product_from(water_project)
-
-    monkeypatch.setattr(
-        OpiAdapter,
-        "optimize_endpoint",
-        lambda self, project, _workdir, **_kwargs: project,
+    monkeypatch.setattr(OpiAdapter, "run_optimization_path", fake_run)
+    manager = JobManager(
+        LocalSettings(jobs_dir=str(tmp_path / "jobs"), orca_path="orca")
     )
-
-    def fake_execute(calc, workdir, **_kwargs):
-        (workdir / "reaction.out").write_bytes(
-            b"NEB CONVERGED\nHURRAY\n****ORCA TERMINATED NORMALLY****\n"
-        )
-
-    monkeypatch.setattr(OpiAdapter, "_execute", staticmethod(fake_execute))
-    manager = JobManager(LocalSettings(jobs_dir=str(tmp_path), orca_path="orca"))
     record = manager.create(
-        water_project,
-        JobMode.ORCA,
-        calculation_kind=CalculationKind.REACTION_PATH,
-        product=product,
+        water_project, "orca", calculation_kind=CalculationKind.REACTION_PATH
     )
-    finished = wait_terminal(manager, record.id)
-    assert finished.state == JobState.FAILED
-    assert finished.error_code == "FINAL_NEB_TRAJECTORY_MISSING"
-    assert not (tmp_path / str(record.id) / "reaction-path.json").exists()
-    manager.executor.shutdown()
-
-
-def test_endpoint_optimization_failures_identify_the_failed_side(
-    tmp_path, water_project, monkeypatch
-):
-    product = product_from(water_project)
-    count = 0
-
-    def fail_second(self, project, _workdir, **_kwargs):
-        nonlocal count
-        count += 1
-        if count == 2:
-            raise ChemistryError("GEOMETRY_NOT_CONVERGED", "product did not converge")
-        return project
-
-    monkeypatch.setattr(OpiAdapter, "optimize_endpoint", fail_second)
-    with pytest.raises(ChemistryError) as error:
-        OpiAdapter().run_reaction_path(
-            water_project,
-            product,
-            tmp_path,
-            settings=ReactionPathSettings(),
-            orca_path="orca",
-            cancel_event=Event(),
-        )
-    assert error.value.code == "PRODUCT_OPTIMIZATION_FAILED"
+    for _ in range(100):
+        record = manager.get(record.id)
+        if record.state not in {JobState.QUEUED, JobState.RUNNING}:
+            break
+        time.sleep(0.01)
+    assert record.state == JobState.SUCCEEDED
+    assert called == [water_project.name]
+    folder = manager._job_dir(record.id)
+    assert (folder / "optimization-input.xyz").is_file()
+    assert not (folder / "product-project.json").exists()

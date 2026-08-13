@@ -13,7 +13,6 @@ import { useAnalysisStore } from './store/analysisStore'
 import { useProjectStore } from './store/projectStore'
 import type { Capabilities, JobCreateRequest, JobRecord } from './types'
 import { parseProjectJson, projectToJson } from './chem/serialization'
-import { validateReactionEndpoints } from './chem/reactionEndpoints'
 
 export default function App() {
   const [capabilities, setCapabilities] = useState<Capabilities>()
@@ -32,7 +31,7 @@ export default function App() {
       const playback = await api.reactionPath(record.id)
       useProjectStore.getState().applyReactionPath(playback)
       useProjectStore.getState().setLastCalculationId(record.id)
-      setNotice('반응 경로 계산을 완료하고 재생 데이터를 자동으로 불러왔습니다.')
+      setNotice('최적화 경로 계산을 완료하고 실제 geometry 이력을 불러왔습니다.')
     } else {
       useProjectStore.getState().applyResult(await api.result(record.id))
     }
@@ -80,15 +79,11 @@ export default function App() {
       const state = useProjectStore.getState()
       let request: JobCreateRequest
       if (state.calculationKind === 'reaction-path') {
-        const endpointError = validateReactionEndpoints(state.project, state.reactionProduct)
-        if (endpointError) return setError(endpointError)
-        if (mode !== 'orca') return setError('반응 경로 계산은 실제 ORCA 모드에서만 지원합니다.')
+        if (mode !== 'orca') return setError('최적화 경로 계산은 실제 ORCA 모드에서만 지원합니다.')
         request = {
           mode: 'orca' as const,
           calculationKind: 'reaction-path' as const,
-          reactant: state.project,
-          product: state.reactionProduct!,
-          reactionPathSettings: { interpolation: 'idpp' as const, imageCount: state.reactionImageCount },
+          project: state.project,
         }
         state.setResult(undefined)
         state.beginReactionPathLoad()
@@ -102,8 +97,14 @@ export default function App() {
         const payload = JSON.parse((event as MessageEvent).data); setJob(payload.job); setLog(payload.log)
         if (payload.job.state === 'SUCCEEDED') {
           source.close()
-          await applyCompletedJob(payload.job)
-          if (payload.job.calculationKind === 'single') setNotice(mode === 'demo' ? '모의 결과를 적용했습니다. 실제 양자화학 계산이 아닙니다.' : '입력 구조에서 찾은 국소 최적화 구조를 적용했습니다.')
+          try {
+            await applyCompletedJob(payload.job)
+            if (payload.job.calculationKind === 'single') setNotice(mode === 'demo' ? '모의 결과를 적용했습니다. 실제 양자화학 계산이 아닙니다.' : '입력 구조에서 찾은 국소 최적화 구조를 적용했습니다.')
+          } catch (error) {
+            const message = (error as Error).message
+            if (payload.job.calculationKind === 'reaction-path') useProjectStore.getState().failReactionPath(message)
+            setError(message)
+          }
         }
         if (['FAILED', 'CANCELLED'].includes(payload.job.state)) { source.close(); setError(payload.job.error_detail ?? payload.job.message) }
       })
@@ -128,8 +129,8 @@ export default function App() {
       <button className="icon-button" onClick={() => { setError(); setNotice() }} aria-label="닫기"><X size={16} /></button>
     </div>}
     {reactionCopyPrompt && <div className="modal-backdrop" role="presentation"><div className="reaction-copy-dialog" role="dialog" aria-modal="true" aria-labelledby="reaction-copy-title">
-      <h2 id="reaction-copy-title">계산된 반응 경로의 구조입니다</h2>
-      <p>현재 구조를 새 단일 구조로 복사하면 기존 반응 경로와 분리됩니다.</p>
+      <h2 id="reaction-copy-title">계산된 최적화 경로의 구조입니다</h2>
+      <p>현재 구조를 새 단일 구조로 복사하면 기존 최적화 경로와 분리됩니다.</p>
       <div><button className="primary" onClick={copyReactionFrameToSingle}>새 구조로 복사</button><button onClick={dismissReactionCopyPrompt}>취소</button></div>
     </div></div>}
   </main>

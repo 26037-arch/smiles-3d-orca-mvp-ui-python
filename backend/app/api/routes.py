@@ -246,7 +246,8 @@ async def job_events(job_id: UUID, request: Request) -> StreamingResponse:
             record = jobs.get(job_id)
             logs = jobs.log_text(job_id)
             payload = json.dumps(
-                {"job": record.model_dump(mode="json"), "log": logs}, ensure_ascii=False
+                {"job": record.model_dump(mode="json", by_alias=True), "log": logs},
+                ensure_ascii=False,
             )
             if payload != previous:
                 yield f"event: status\ndata: {payload}\n\n"

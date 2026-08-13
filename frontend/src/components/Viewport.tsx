@@ -5,7 +5,7 @@ import * as THREE from 'three'
 import { Pause, Play } from 'lucide-react'
 import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js'
 import { angleDegrees, distance, normalize, stableAngleAxis, sub } from '../chem/geometry'
-import { advancePlaybackFrame, playbackStartFrame, REACTION_PLAYBACK_FRAME_MS } from '../chem/reactionPath'
+import { advanceOptimizationPlayback, playbackStartFrame, REACTION_PLAYBACK_FRAME_MS } from '../chem/reactionPath'
 import { ELEMENTS } from '../chem/elements'
 import { useProjectStore, visibleProject } from '../store/projectStore'
 import type { Atom, Bond, SketchPlane, SurfaceLayer, Vec3 } from '../types'
@@ -143,12 +143,13 @@ export function ReactionPathControls() {
   const status = useProjectStore(s => s.reactionStatus)
   const playback = useProjectStore(s => s.reactionPath)
   const frameIndex = useProjectStore(s => s.reactionFrameIndex)
+  const scfIterationIndex = useProjectStore(s => s.reactionScfIterationIndex)
   const setFrame = useProjectStore(s => s.setReactionFrame)
+  const setScfIteration = useProjectStore(s => s.setReactionScfIteration)
   const setPlaying = useProjectStore(s => s.setReactionPlaying)
   const error = useProjectStore(s => s.reactionError)
-  const reactionProduct = useProjectStore(s => s.reactionProduct)
   const selectedOrbital = useProjectStore(s => s.selectedOrbital)
-  const result = useProjectStore(s => s.result)
+  const jobId = useProjectStore(s => s.project.lastCalculationId)
   const [orbitalTrack, setOrbitalTrack] = useState<{ active: boolean; loading: boolean; error?: string; frameSurfaces?: Record<string, Record<string, string>> }>({ active: true, loading: false })
   const orbitalRequest = useRef<AbortController | undefined>(undefined)
   const upsertSurface = useProjectStore(s => s.upsertSurface)
@@ -164,8 +165,13 @@ export function ReactionPathControls() {
       if (time - previousTime.current >= REACTION_PLAYBACK_FRAME_MS) {
         previousTime.current = time
         const state = useProjectStore.getState()
-        const next = advancePlaybackFrame(state.reactionFrameIndex, playback.displayFrames.length)
-        state.setReactionFrame(next.index)
+        const next = advanceOptimizationPlayback(
+          playback,
+          state.reactionFrameIndex,
+          state.reactionScfIterationIndex,
+        )
+        if (next.frameIndex !== state.reactionFrameIndex) state.setReactionFrame(next.frameIndex)
+        state.setReactionScfIteration(next.scfIterationIndex)
         if (!next.playing) state.setReactionPlaying(false)
       }
       if (useProjectStore.getState().reactionStatus === 'playing') requestRef.current = requestAnimationFrame(tick)
@@ -180,19 +186,19 @@ export function ReactionPathControls() {
 
   useEffect(() => {
     orbitalRequest.current?.abort()
-    if (!selectedOrbital || !result || !playback) {
+    if (!selectedOrbital || !jobId || !playback) {
       setOrbitalTrack({ active: true, loading: false })
       return
     }
     const controller = new AbortController(); orbitalRequest.current = controller
     setOrbitalTrack({ active: true, loading: true })
-    api.reactionOrbitalTrack(result.job_id, selectedOrbital, reactionIsovalue, controller.signal).then(track => {
+    api.reactionOrbitalTrack(jobId, selectedOrbital, reactionIsovalue, controller.signal).then(track => {
       if (!controller.signal.aborted) setOrbitalTrack({ active: track.active, loading: false, frameSurfaces: track.frameSurfaces })
     }).catch(error => {
       if (!controller.signal.aborted) setOrbitalTrack({ active: false, loading: false, error: (error as Error).message })
     })
     return () => controller.abort()
-  }, [selectedOrbital, result, playback, reactionIsovalue, removeSurface])
+  }, [selectedOrbital, jobId, playback, reactionIsovalue, removeSurface])
 
   useEffect(() => {
     if (calculationKind !== 'reaction-path') removeSurface('reaction-path-mo')
@@ -200,7 +206,12 @@ export function ReactionPathControls() {
   }, [calculationKind, removeSurface])
 
   useEffect(() => {
-    if (!selectedOrbital || !playback || orbitalTrack.loading) return
+    const frame = playback?.displayFrames[frameIndex]
+    const iterations = frame ? playback?.path.images[frame.leftImageIndex]?.scfIterations?.length ?? 0 : 0
+    if (!selectedOrbital || !playback || orbitalTrack.loading || scfIterationIndex < iterations) {
+      removeSurface('reaction-path-mo')
+      return
+    }
     const meshUrls = orbitalTrack.frameSurfaces?.[String(frameIndex)]
     if (!meshUrls) {
       removeSurface('reaction-path-mo')
@@ -212,14 +223,14 @@ export function ReactionPathControls() {
       orbitalInternalId: selectedOrbital, spin: selectedOrbital.startsWith('alpha:') ? 'alpha' : selectedOrbital.startsWith('beta:') ? 'beta' : 'restricted',
       visible: true, opacity: .55, isovalue: reactionIsovalue, positiveColor: '#45b8ff', negativeColor: '#ff6a8a', meshUrls, reactionFrame: true,
     })
-  }, [selectedOrbital, playback, frameIndex, orbitalTrack, reactionIsovalue, upsertSurface, removeSurface])
+  }, [selectedOrbital, playback, frameIndex, scfIterationIndex, orbitalTrack, reactionIsovalue, upsertSurface, removeSurface])
 
   if (calculationKind !== 'reaction-path') return null
   if (!playback) {
     const notFound = !error || error.startsWith('REACTION_PATH_NOT_FOUND')
     return <div className="reaction-empty" role="status">
-      <strong>{reactionProduct && !error ? '반응물과 생성물 endpoint를 준비했습니다.' : notFound ? '지원되는 반응 경로 결과가 없습니다.' : '반응 경로 결과는 있지만 형식 검증에 실패했습니다.'}</strong>
-      <span>{status === 'loading-path' ? 'endpoint 최적화와 ORCA NEB 계산을 준비하거나 기존 결과를 찾는 중입니다…' : reactionProduct && !error ? '검증이 완료되면 ORCA 계산을 실행하세요.' : notFound ? '필요한 파일: *_MEP_trj.xyz 또는 *_IRC_Full_trj.xyz' : 'trajectory의 원자 수, 원소 순서와 좌표를 확인하세요.'}</span>
+      <strong>{notFound ? '최적화 경로 결과가 없습니다.' : '최적화 경로 결과는 있지만 형식 검증에 실패했습니다.'}</strong>
+      <span>{status === 'loading-path' ? 'ORCA 구조 최적화 결과를 찾는 중입니다…' : notFound ? '현재 R0 구조로 최적화 경로 계산을 실행하세요.' : 'optimization trajectory의 원자 수, 원소 순서와 좌표를 확인하세요.'}</span>
       {error && !notFound && <em>세부 정보: {error}</em>}
     </div>
   }
@@ -227,22 +238,36 @@ export function ReactionPathControls() {
   const atEnd = frameIndex === playback.displayFrames.length - 1
   const toggle = () => {
     if (status === 'playing') return setPlaying(false)
-    if (atEnd) setFrame(playbackStartFrame(frameIndex, playback.displayFrames.length))
+    if (atEnd) {
+      setFrame(playbackStartFrame(frameIndex, playback.displayFrames.length))
+      setScfIteration(0)
+    }
     setPlaying(true)
   }
   const pointText = frame.isCalculated
     ? `계산 지점 ${frame.leftImageIndex + 1}/${playback.path.images.length}`
     : `보간됨 · 지점 ${frame.leftImageIndex + 1}→${frame.rightImageIndex + 1}`
-  const hasWavefunctions = playback.path.images.every(image => Object.keys(image.orbitalRefs).length > 0)
-  return <div className="reaction-controls" aria-label="반응 경로 재생">
+  const image = playback.path.images[frame.leftImageIndex]
+  const scfIterations = image.scfIterations ?? []
+  const currentScf = scfIterations[Math.max(0, scfIterationIndex - 1)]
+  const hasWavefunctions = Boolean(playback.path.images[0]?.wavefunctionRef || Object.keys(playback.path.images[0]?.orbitalRefs ?? {}).length)
+  const geometryEnergies = playback.path.images.map(item => item.relativeEnergyKjMol).filter((value): value is number => value != null)
+  const scfEnergies = scfIterations.slice(0, scfIterationIndex).map(item => item.energyHartree).filter((value): value is number => value != null)
+  const points = (values: number[]) => {
+    if (!values.length) return ''
+    const minimum = Math.min(...values); const span = Math.max(1e-12, Math.max(...values) - minimum)
+    return values.map((value, index) => `${(index / Math.max(1, values.length - 1)) * 138 + 1},${27 - ((value - minimum) / span) * 24}`).join(' ')
+  }
+  return <div className="reaction-controls" aria-label="최적화 경로 재생">
     <button className="reaction-play" onClick={toggle} aria-label={status === 'playing' ? '일시정지' : '재생'}>{status === 'playing' ? <Pause /> : <Play />}</button>
-    <input aria-label="반응 경로 프레임" type="range" min="0" max={playback.displayFrames.length - 1} step="1" value={frameIndex} onChange={event => { setPlaying(false); setFrame(Number(event.target.value)) }} />
-    <div className="reaction-frame-info"><strong>{pointText}</strong><span>경로 위치 {(frame.reactionCoordinate * 100).toFixed(1)}%</span></div>
-    <div className="reaction-energy">{frame.relativeEnergyKjMol == null ? '에너지 없음' : `${frame.relativeEnergyKjMol.toFixed(2)} kJ/mol${frame.isCalculated ? '' : ' · 보간값'}`}</div>
-    {!hasWavefunctions && <div className="reaction-mo-warning">이 반응 경로에는 이미지별 파동함수 결과가 없습니다. 분자 구조 경로만 재생할 수 있습니다.</div>}
+    <input aria-label="최적화 경로 프레임" type="range" min="0" max={playback.displayFrames.length - 1} step="1" value={frameIndex} onChange={event => { setPlaying(false); setFrame(Number(event.target.value)) }} />
+    <div className="reaction-frame-info"><strong>{pointText}</strong><span>{scfIterations.length ? `SCF ${Math.min(scfIterationIndex, scfIterations.length)}/${scfIterations.length}` : 'SCF 이력 없음'}</span></div>
+    <div className="reaction-energy">{frame.isCalculated && frame.relativeEnergyKjMol != null ? `${frame.relativeEnergyKjMol.toFixed(2)} kJ/mol` : '표시 보간 · 에너지 없음'}{currentScf?.energyHartree != null && ` · SCF ${currentScf.energyHartree.toFixed(8)} Eh`}</div>
+    <div className="reaction-graphs"><label>Geometry ΔE<svg viewBox="0 0 140 30"><polyline points={points(geometryEnergies)} /></svg></label><label>현재 geometry SCF<svg viewBox="0 0 140 30"><polyline points={points(scfEnergies)} /></svg></label></div>
+    {!hasWavefunctions && <div className="reaction-mo-warning">이 최적화 경로에는 파동함수 결과가 없습니다. 분자 구조 경로만 재생할 수 있습니다.</div>}
     {selectedOrbital && orbitalTrack.loading && <div className="reaction-mo-warning">선택한 MO의 cube와 중첩을 준비하는 중…</div>}
     {selectedOrbital && !orbitalTrack.loading && !orbitalTrack.active && <div className="reaction-mo-warning">{orbitalTrack.error ?? '대응 오비탈 없음 — 추적 종료'} · 원자 경로는 계속 재생됩니다.</div>}
-    <p>계산 경로의 시각적 보간이며 프레임 간격은 실제 시간이 아닙니다.</p>
+    <p>geometry 사이 보간은 표시 전용이며 에너지나 실제 시간으로 해석하지 않습니다.</p>
   </div>
 }
 

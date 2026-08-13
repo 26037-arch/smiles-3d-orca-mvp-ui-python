@@ -10,7 +10,20 @@ from pathlib import Path
 from threading import Event
 from typing import Callable
 
-from ..models import CalculationResult, MoleculeProject, Orbital, ReactionPathSettings
+from ..models import (
+    CalculationResult,
+    MoleculeProject,
+    Orbital,
+    ReactionPathResult,
+    ReactionPathSettings,
+)
+from ..reaction_path.errors import ReactionPathError
+from ..reaction_path.importer import ReactionPathManifestGenerator
+from ..reaction_path.optimization import (
+    build_optimization_path,
+    optimization_frames,
+    parse_scf_history,
+)
 from .encoding import install_opi_utf8_compatibility
 from .presets import get_preset
 
@@ -31,7 +44,7 @@ class OpiAdapter:
     def build_calculator(self, project: MoleculeProject, workdir: Path, basename: str = "optimization"):
         try:
             from opi.core import Calculator
-            from opi.input.simple_keywords import Dft, Task
+            from opi.input.simple_keywords import Dft, Scf, Task
             from opi.input.structures.structure import Structure
         except ImportError as exc:
             raise ChemistryError("OPI_UNAVAILABLE", "OPI 2.0을 import할 수 없습니다") from exc
@@ -47,7 +60,7 @@ class OpiAdapter:
         calculator = Calculator(basename=basename, working_dir=workdir, version_check=False)
         calculator.structure = structure
         # Both MVP presets share the documented r2SCAN-3c optimization stage.
-        calculator.input.add_simple_keywords(Dft.R2SCAN_3C, Task.OPT)
+        calculator.input.add_simple_keywords(Dft.R2SCAN_3C, Scf.PATOM, Task.OPT)
         calculator.input.ncores = 1
         return calculator
 
@@ -89,23 +102,7 @@ class OpiAdapter:
             )
             electronic_output.parse()
 
-        mo_groups = electronic_output.get_mos() or {}
-        orbitals: list[Orbital] = []
-        for key, spin in (("mo", "restricted"), ("alpha", "alpha"), ("beta", "beta")):
-            channel = mo_groups.get(key, [])
-            occupied_indices = [i for i, mo in enumerate(channel) if float(mo.occupancy) > 0]
-            virtual_indices = [i for i, mo in enumerate(channel) if float(mo.occupancy) == 0]
-            homo_index = occupied_indices[-1] if occupied_indices else None
-            lumo_index = virtual_indices[0] if virtual_indices else None
-            orbitals.extend(
-                Orbital(
-                    internal_id=f"{spin}:{i}", orca_index=i, display_number=i + 1,
-                    energy_hartree=float(mo.orbitalenergy), occupancy=float(mo.occupancy),
-                    spin=spin,
-                    label="HOMO" if i == homo_index else "LUMO" if i == lumo_index else None,
-                )
-                for i, mo in enumerate(channel)
-            )
+        orbitals = _extract_orbitals(electronic_output)
         homo = max((o for o in orbitals if o.occupancy > 0), key=lambda o: o.energy_hartree, default=None)
         lumo = min((o for o in orbitals if o.occupancy == 0), key=lambda o: o.energy_hartree, default=None)
         energy = electronic_output.get_final_energy()
@@ -172,6 +169,178 @@ class OpiAdapter:
         ]
         return project.model_copy(update={"atoms": atoms}), output
 
+    def build_path_single_point(
+        self,
+        project: MoleculeProject,
+        positions: list[tuple[float, float, float]],
+        workdir: Path,
+        *,
+        basename: str,
+        previous_gbw: Path | None,
+    ):
+        """Build one immutable per-geometry electronic-structure calculation."""
+
+        try:
+            from opi.core import Calculator
+            from opi.input.simple_keywords import (
+                BasisSet,
+                Dft,
+                DispersionCorrection,
+                Scf,
+                Task,
+            )
+            from opi.input.structures.structure import Structure
+        except ImportError as exc:
+            raise ChemistryError("OPI_UNAVAILABLE", "OPI 2.0을 import할 수 없습니다") from exc
+
+        calculator = Calculator(
+            basename=basename, working_dir=workdir, version_check=False
+        )
+        calculator.structure = Structure.from_lists(
+            [atom.element for atom in project.atoms],
+            positions,
+            charge=project.total_charge,
+            multiplicity=project.multiplicity,
+        )
+        if project.calculation_preset == "standard":
+            calculator.input.add_simple_keywords(
+                Dft.PBE0,
+                DispersionCorrection.D4,
+                BasisSet.DEF2_SVP,
+                Scf.TIGHTSCF,
+                Task.SP,
+            )
+        else:
+            calculator.input.add_simple_keywords(Dft.R2SCAN_3C, Task.SP)
+        if previous_gbw is None:
+            calculator.input.add_simple_keywords(Scf.PATOM)
+        else:
+            calculator.input.add_simple_keywords(Scf.MOREAD)
+            calculator.input.moinp = previous_gbw
+        calculator.input.ncores = 1
+        return calculator
+
+    def run_optimization_path(
+        self,
+        project: MoleculeProject,
+        workdir: Path,
+        *,
+        orca_path: str,
+        cancel_event: Event,
+        process_started: Callable[[subprocess.Popen[str]], None] | None = None,
+        stage: Callable[[float, str], None] | None = None,
+    ) -> ReactionPathResult:
+        """Run the real r2SCAN-3c optimization and persist its actual geometries."""
+
+        install_opi_utf8_compatibility()
+        notify = stage or (lambda _progress, message: self.log(message))
+        notify(0.12, "r2SCAN-3c 구조 최적화")
+        calculator = self.build_calculator(project, workdir, basename="optimization")
+        calculator.write_input()
+        self._execute(
+            calculator,
+            workdir,
+            orca_path=orca_path,
+            cancel_event=cancel_event,
+            process_started=process_started,
+        )
+        output = calculator.get_output()
+        _check_output_status(output, require_geometry=True)
+        output.parse()
+
+        notify(0.58, "실제 최적화 geometry와 SCF 이력 수집")
+        trajectory = workdir / "optimization_trj.xyz"
+        try:
+            frames = optimization_frames(output, trajectory, project)
+        except ReactionPathError as exc:
+            raise ChemistryError(exc.code, exc.detail) from exc
+        try:
+            histories = parse_scf_history(workdir / "optimization.out")
+        except ReactionPathError as exc:
+            self.log(f"SCF 이력 파싱 경고 [{exc.code}]: {exc.detail}")
+            histories = []
+
+        orbitals_by_step: list[list[Orbital]] = []
+        wavefunctions: list[str | None] = []
+        step_success: list[bool] = []
+        previous_gbw: Path | None = None
+        total = len(frames)
+        for index, frame in enumerate(frames):
+            if cancel_event.is_set():
+                raise ChemistryError("CANCELLED", "사용자가 계산을 취소했습니다")
+            notify(
+                0.62 + 0.30 * ((index + 1) / total),
+                f"geometry {index + 1}/{total} single point",
+            )
+            basename = f"step-{index:03d}"
+            try:
+                single_point = self.build_path_single_point(
+                    project,
+                    frame.coordinates,
+                    workdir,
+                    basename=basename,
+                    previous_gbw=previous_gbw,
+                )
+                single_point.write_input()
+                self._execute(
+                    single_point,
+                    workdir,
+                    orca_path=orca_path,
+                    cancel_event=cancel_event,
+                    process_started=process_started,
+                )
+                step_output = single_point.get_output()
+                _check_output_status(
+                    step_output, require_geometry=False, single_point=True
+                )
+                step_output.parse()
+                gbw = workdir / f"{basename}.gbw"
+                if not gbw.is_file():
+                    raise ChemistryError(
+                        "STEP_WAVEFUNCTION_MISSING",
+                        f"{basename}.gbw를 찾을 수 없습니다",
+                    )
+                orbitals_by_step.append(_extract_orbitals(step_output))
+                wavefunctions.append(gbw.name)
+                step_success.append(True)
+                previous_gbw = gbw
+            except ChemistryError as exc:
+                if exc.code == "CANCELLED":
+                    raise
+                if index in {0, total - 1}:
+                    code = (
+                        "INITIAL_SINGLE_POINT_FAILED"
+                        if index == 0
+                        else "FINAL_SINGLE_POINT_FAILED"
+                    )
+                    raise ChemistryError(code, exc.detail) from exc
+                self.log(
+                    f"geometry {index + 1} single point 건너뜀 "
+                    f"[{exc.code}]: {exc.detail}"
+                )
+                orbitals_by_step.append([])
+                wavefunctions.append(None)
+                step_success.append(False)
+
+        try:
+            result = build_optimization_path(
+                workdir,
+                project,
+                frames,
+                histories,
+                orbitals_by_step,
+                wavefunctions,
+                step_success,
+            )
+        except ReactionPathError as exc:
+            raise ChemistryError(exc.code, exc.detail) from exc
+        ReactionPathManifestGenerator._atomic_write(
+            workdir / "reaction-path.json",
+            result.model_dump(by_alias=True, mode="json"),
+        )
+        notify(0.96, "최적화 경로 manifest 저장")
+        return result
+
     def build_neb_calculator(
         self,
         reactant_xyz: Path,
@@ -206,7 +375,7 @@ class OpiAdapter:
         calculator.input.ncores = 1
         return calculator
 
-    def run_reaction_path(
+    def run_neb_path(
         self,
         reactant: MoleculeProject,
         product: MoleculeProject,
@@ -326,6 +495,30 @@ class OpiAdapter:
                 time.sleep(0.05)
         if process.returncode != 0:
             raise ChemistryError("ABNORMAL_TERMINATION", f"ORCA 종료 코드: {process.returncode}")
+
+
+def _extract_orbitals(output: object) -> list[Orbital]:
+    mo_groups = output.get_mos() or {}  # type: ignore[attr-defined]
+    orbitals: list[Orbital] = []
+    for key, spin in (("mo", "restricted"), ("alpha", "alpha"), ("beta", "beta")):
+        channel = mo_groups.get(key, [])
+        occupied = [i for i, mo in enumerate(channel) if float(mo.occupancy) > 0]
+        virtual = [i for i, mo in enumerate(channel) if float(mo.occupancy) == 0]
+        homo = occupied[-1] if occupied else None
+        lumo = virtual[0] if virtual else None
+        orbitals.extend(
+            Orbital(
+                internal_id=f"{spin}:{i}",
+                orca_index=i,
+                display_number=i + 1,
+                energy_hartree=float(mo.orbitalenergy),
+                occupancy=float(mo.occupancy),
+                spin=spin,
+                label="HOMO" if i == homo else "LUMO" if i == lumo else None,
+            )
+            for i, mo in enumerate(channel)
+        )
+    return orbitals
 
 
 def _check_output_status(

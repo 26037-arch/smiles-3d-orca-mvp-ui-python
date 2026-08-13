@@ -147,6 +147,8 @@ class CalculationKind(StrEnum):
 
 
 class ReactionPathSettings(StrictModel):
+    """Legacy NEB settings kept for the standalone NEB adapter."""
+
     interpolation: Literal["idpp"] = "idpp"
     image_count: int = Field(default=8, alias="imageCount", ge=1, le=32)
 
@@ -157,19 +159,12 @@ class JobCreate(StrictModel):
         default=CalculationKind.SINGLE, alias="calculationKind"
     )
     project: MoleculeProject | None = None
-    reactant: MoleculeProject | None = None
-    product: MoleculeProject | None = None
-    reaction_path_settings: ReactionPathSettings = Field(
-        default_factory=ReactionPathSettings, alias="reactionPathSettings"
-    )
 
     @model_validator(mode="after")
     def payload_matches_calculation_kind(self) -> "JobCreate":
-        if self.calculation_kind == CalculationKind.SINGLE:
-            if self.reactant is not None or self.product is not None:
-                raise ValueError("single 작업에는 project만 사용할 수 있습니다")
-        elif self.project is not None:
-            raise ValueError("reaction-path 작업에는 reactant와 product를 사용해야 합니다")
+        if self.project is None:
+            label = "단일 구조" if self.calculation_kind == CalculationKind.SINGLE else "최적화 경로"
+            raise ValueError(f"{label} 계산에는 project가 필요합니다")
         return self
 
 
@@ -241,16 +236,26 @@ class CalculatedImage(StrictModel):
     index: int = Field(ge=0)
     atoms: list[CalculatedAtom]
     energy_hartree: float | None = Field(default=None, alias="energyHartree")
+    energy_change_hartree: float | None = Field(default=None, alias="energyChangeHartree")
     relative_energy_kj_mol: float | None = Field(default=None, alias="relativeEnergyKjMol")
     reaction_coordinate: float | None = Field(default=None, alias="reactionCoordinate")
     gradient: list[list[float]] | None = None
     wavefunction_ref: str | None = Field(default=None, alias="wavefunctionRef")
     orbital_refs: dict[str, str] = Field(default_factory=dict, alias="orbitalRefs")
+    orbitals: list[Orbital] = Field(default_factory=list)
+    scf_iterations: list["ScfIteration"] = Field(default_factory=list, alias="scfIterations")
+    scf_converged: bool | None = Field(default=None, alias="scfConverged")
+    geometry_converged: bool | None = Field(default=None, alias="geometryConverged")
     convergence: Literal["converged", "unconverged", "unknown"] = "unknown"
 
     @model_validator(mode="after")
     def finite_metadata(self) -> "CalculatedImage":
-        values = (self.energy_hartree, self.relative_energy_kj_mol, self.reaction_coordinate)
+        values = (
+            self.energy_hartree,
+            self.energy_change_hartree,
+            self.relative_energy_kj_mol,
+            self.reaction_coordinate,
+        )
         if any(value is not None and not math.isfinite(value) for value in values):
             raise ValueError("계산 지점의 에너지와 반응좌표는 유한한 수여야 합니다")
         if self.gradient is not None:
@@ -258,6 +263,30 @@ class CalculatedImage(StrictModel):
                 raise ValueError("gradient는 원자마다 3개 성분을 가져야 합니다")
             if any(not math.isfinite(value) for row in self.gradient for value in row):
                 raise ValueError("gradient에 NaN 또는 무한대가 있습니다")
+        return self
+
+
+class ScfIteration(StrictModel):
+    iteration: int = Field(ge=1)
+    energy_hartree: float | None = Field(default=None, alias="energyHartree")
+    delta_energy_hartree: float | None = Field(default=None, alias="deltaEnergyHartree")
+    rms_density: float | None = Field(default=None, alias="rmsDensity")
+    max_density: float | None = Field(default=None, alias="maxDensity")
+    diis_error: float | None = Field(default=None, alias="diisError")
+    max_gradient: float | None = Field(default=None, alias="maxGradient")
+
+    @model_validator(mode="after")
+    def finite_values(self) -> "ScfIteration":
+        values = (
+            self.energy_hartree,
+            self.delta_energy_hartree,
+            self.rms_density,
+            self.max_density,
+            self.diis_error,
+            self.max_gradient,
+        )
+        if any(value is not None and not math.isfinite(value) for value in values):
+            raise ValueError("SCF iteration 값은 유한해야 합니다")
         return self
 
 
@@ -271,14 +300,23 @@ class ReactionPathSourceMetadata(StrictModel):
 
 class ReactionPathResult(StrictModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True, frozen=True)
-    schema_version: Literal[1] = Field(alias="schemaVersion")
-    source_type: Literal["imported", "neb", "irc", "relaxed-scan"] = Field(alias="sourceType")
+    schema_version: Literal[1, 2] = Field(alias="schemaVersion")
+    path_type: Literal["neb", "geometry-optimization"] | None = Field(
+        default=None, alias="pathType"
+    )
+    source_type: Literal[
+        "imported", "neb", "irc", "relaxed-scan", "orca-optimization"
+    ] = Field(alias="sourceType")
     atom_count: int = Field(alias="atomCount", ge=1)
     elements: list[str]
     charge: int | None = None
     multiplicity: int | None = Field(default=None, ge=1)
     images: list[CalculatedImage]
     has_physical_time: Literal[False] = Field(default=False, alias="hasPhysicalTime")
+    is_physical_time_trajectory: Literal[False] = Field(
+        default=False, alias="isPhysicalTimeTrajectory"
+    )
+    initial_guess: Literal["PAtom"] | None = Field(default=None, alias="initialGuess")
     energy_unit: Literal["hartree"] = Field(default="hartree", alias="energyUnit")
     relative_energy_unit: Literal["kJ/mol"] = Field(
         default="kJ/mol", alias="relativeEnergyUnit"
@@ -294,6 +332,17 @@ class ReactionPathResult(StrictModel):
         default=None, alias="sourceMetadata"
     )
 
+    @model_validator(mode="after")
+    def version_semantics(self) -> "ReactionPathResult":
+        if self.schema_version == 2:
+            if self.path_type != "geometry-optimization":
+                raise ValueError("schema 2에는 geometry-optimization pathType이 필요합니다")
+            if self.source_type != "orca-optimization" or self.initial_guess != "PAtom":
+                raise ValueError("schema 2 최적화 경로 메타데이터가 올바르지 않습니다")
+            if not self.images:
+                raise ValueError("최적화 경로에는 최소 한 개의 geometry step이 필요합니다")
+        return self
+
 
 class DisplayFrame(StrictModel):
     index: int = Field(ge=0)
@@ -304,6 +353,9 @@ class DisplayFrame(StrictModel):
     reaction_coordinate: float = Field(alias="reactionCoordinate", ge=0, le=1)
     relative_energy_kj_mol: float | None = Field(default=None, alias="relativeEnergyKjMol")
     is_calculated: bool = Field(alias="isCalculated")
+    frame_type: Literal["actual-geometry", "display-interpolation"] = Field(
+        default="actual-geometry", alias="frameType"
+    )
 
 
 class ReactionPathPlayback(StrictModel):

@@ -44,6 +44,7 @@ def test_opi_adapter_uses_public_structure_and_calculator_api(monkeypatch, water
     }
     modules["opi.core"].Calculator = Calculator
     modules["opi.input.simple_keywords"].Dft = SimpleNamespace(R2SCAN_3C="R2SCAN_3C")
+    modules["opi.input.simple_keywords"].Scf = SimpleNamespace(PATOM="PATOM")
     modules["opi.input.simple_keywords"].Task = SimpleNamespace(OPT="OPT")
     modules["opi.input.structures.structure"].Structure = Structure
     for name, module in modules.items():
@@ -52,7 +53,7 @@ def test_opi_adapter_uses_public_structure_and_calculator_api(monkeypatch, water
     assert calc.structure is not None
     assert captured["symbols"] == ["O", "H", "H"]
     assert captured["charge"] == 0 and captured["multiplicity"] == 1
-    assert captured["keywords"] == ("R2SCAN_3C", "OPT")
+    assert captured["keywords"] == ("R2SCAN_3C", "PATOM", "OPT")
 
 
 def test_output_status_is_independent_of_windows_cp949(tmp_path):

@@ -142,12 +142,26 @@ def create_display_frames(
     images: list[CalculatedImage],
     elements: list[str],
     samples_per_segment: int = DISPLAY_SAMPLES_PER_SEGMENT,
+    *,
+    interpolate_energy: bool = True,
 ) -> list[DisplayFrame]:
-    if len(images) < 2:
-        raise ValueError("반응 경로에는 계산 지점이 두 개 이상 필요합니다")
+    if not images:
+        raise ValueError("경로에는 계산 지점이 하나 이상 필요합니다")
     if samples_per_segment < 1:
         raise ValueError("구간별 표시 샘플 수는 1 이상이어야 합니다")
     aligned = align_path(images, elements)
+    if len(images) == 1:
+        return [DisplayFrame(
+            index=0,
+            leftImageIndex=0,
+            rightImageIndex=0,
+            interpolationValue=0,
+            coordinates=[tuple(row) for row in aligned[0].tolist()],
+            reactionCoordinate=0,
+            relativeEnergyKjMol=images[0].relative_energy_kj_mol,
+            isCalculated=True,
+            frameType="actual-geometry",
+        )]
     path = normalized_path_coordinate(images, aligned)
     tangents = _tangents(aligned, path)
     frames: list[DisplayFrame] = []
@@ -160,12 +174,19 @@ def create_display_frames(
             )
             left_energy = images[segment].relative_energy_kj_mol
             right_energy = images[segment + 1].relative_energy_kj_mol
-            energy = None if left_energy is None or right_energy is None else (1 - u) * left_energy + u * right_energy
+            energy = (
+                None
+                if step > 0 and not interpolate_energy
+                else None
+                if left_energy is None or right_energy is None
+                else (1 - u) * left_energy + u * right_energy
+            )
             frames.append(DisplayFrame(
                 index=len(frames), leftImageIndex=segment, rightImageIndex=segment + 1,
                 interpolationValue=u, coordinates=[tuple(row) for row in coordinates.tolist()],
                 reactionCoordinate=float((1 - u) * path[segment] + u * path[segment + 1]),
                 relativeEnergyKjMol=energy, isCalculated=step == 0,
+                frameType="actual-geometry" if step == 0 else "display-interpolation",
             ))
     final = aligned[-1]
     frames.append(DisplayFrame(
@@ -173,5 +194,6 @@ def create_display_frames(
         interpolationValue=0, coordinates=[tuple(row) for row in final.tolist()],
         reactionCoordinate=1, relativeEnergyKjMol=images[-1].relative_energy_kj_mol,
         isCalculated=True,
+        frameType="actual-geometry",
     ))
     return frames

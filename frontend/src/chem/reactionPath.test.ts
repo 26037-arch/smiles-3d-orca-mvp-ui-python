@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { advancePlaybackFrame, inferReactionBonds, playbackStartFrame, projectForReactionFrame } from './reactionPath'
-import type { DisplayFrame, MoleculeProject, ReactionPathResult } from '../types'
+import { advanceOptimizationPlayback, advancePlaybackFrame, inferReactionBonds, playbackStartFrame, projectForReactionFrame } from './reactionPath'
+import type { DisplayFrame, MoleculeProject, ReactionPathPlayback, ReactionPathResult } from '../types'
 
 const base: MoleculeProject = {
   schemaVersion: 1, name: 'H2', atoms: [
@@ -25,6 +25,25 @@ describe('reaction path playback helpers', () => {
     expect(advancePlaybackFrame(2, 3)).toEqual({ index: 2, playing: false })
     expect(playbackStartFrame(2, 3)).toBe(0)
     expect(advancePlaybackFrame(0, 3)).toEqual({ index: 1, playing: true })
+  })
+
+  it('replays SCF iterations before advancing an actual geometry', () => {
+    const playback = {
+      path: {
+        ...path,
+        images: [{
+          id: 'g0', index: 0, atoms: [], energyHartree: -1, relativeEnergyKjMol: 0,
+          reactionCoordinate: 0, orbitalRefs: {}, convergence: 'converged',
+          scfIterations: [
+            { iteration: 1, energyHartree: -0.9, deltaEnergyHartree: null, rmsDensity: null, maxDensity: null, diisError: null, maxGradient: null },
+            { iteration: 2, energyHartree: -1, deltaEnergyHartree: -.1, rmsDensity: null, maxDensity: null, diisError: null, maxGradient: null },
+          ],
+        }],
+      },
+      displayFrames: [frame(.7, true), { ...frame(.8), index: 1 }],
+    } as ReactionPathPlayback
+    expect(advanceOptimizationPlayback(playback, 0, 0)).toEqual({ frameIndex: 0, scfIterationIndex: 1, playing: true })
+    expect(advanceOptimizationPlayback(playback, 0, 2)).toEqual({ frameIndex: 1, scfIterationIndex: 0, playing: true })
   })
 
   it('keeps atom ids while synchronizing display coordinates', () => {

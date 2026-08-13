@@ -23,7 +23,7 @@ export function projectToXyz(project: MoleculeProject): string {
 export function xyzToAtoms(text: string): Atom[] {
   const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/); const count = Number(lines[0]?.trim())
   if (!Number.isInteger(count) || count < 0 || lines.length < count + 2) throw new Error('손상된 XYZ 파일입니다')
-  if (lines.slice(count + 2).some(line => line.trim())) throw new Error('생성물 XYZ에는 단일 구조만 허용됩니다')
+  if (lines.slice(count + 2).some(line => line.trim())) throw new Error('XYZ 불러오기는 단일 구조만 허용됩니다')
   return lines.slice(2, count + 2).map((line, i) => {
     const [raw, ...coords] = line.trim().split(/\s+/); const element = normalizeElement(raw); const position = coords.slice(0, 3).map(Number)
     if (!element || position.length !== 3 || position.some(x => !Number.isFinite(x))) throw new Error(`XYZ ${i + 3}행이 잘못되었습니다`)

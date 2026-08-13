@@ -87,7 +87,7 @@ def _parse_energy(comment: str) -> float | None:
     return None
 
 
-def parse_multi_xyz(path: Path) -> list[ParsedFrame]:
+def parse_multi_xyz(path: Path, *, minimum_frames: int = 2) -> list[ParsedFrame]:
     try:
         size = path.stat().st_size
     except OSError as exc:
@@ -178,8 +178,10 @@ def parse_multi_xyz(path: Path) -> list[ParsedFrame]:
             raise ReactionPathError(
                 "TOO_MANY_IMAGES", f"Trajectory exceeds the {MAX_IMAGES}-image limit."
             )
-    if len(frames) < 2:
-        raise ReactionPathError("TOO_FEW_IMAGES", "A reaction path requires at least two images.")
+    if len(frames) < minimum_frames:
+        raise ReactionPathError(
+            "TOO_FEW_IMAGES", f"The trajectory requires at least {minimum_frames} image(s)."
+        )
     return frames
 
 
@@ -294,7 +296,7 @@ class ReactionPathManifestGenerator:
                 detected_type = self._source_type_from_name(source_path.name)
                 current = _source_metadata(root, source_path)
                 source_type = existing.get("sourceType")
-                if source_type not in {"neb", "irc"}:
+                if source_type not in {"neb", "irc", "orca-optimization"}:
                     source_type = detected_type
                 unchanged = all(
                     current.get(key) == metadata.get(key)
@@ -302,6 +304,11 @@ class ReactionPathManifestGenerator:
                 )
                 if unchanged and source_type == detected_type:
                     return destination
+                if detected_type == "orca-optimization":
+                    raise ReactionPathError(
+                        "OPTIMIZATION_TRAJECTORY_INVALID",
+                        "optimization trajectory가 manifest 생성 후 변경되었습니다. 계산을 다시 실행하세요.",
+                    )
                 return self._generate(root, TrajectorySource(source_path, detected_type))
             if existing is not None:
                 return destination
@@ -328,13 +335,15 @@ class ReactionPathManifestGenerator:
     @staticmethod
     def _manifest_schema_valid(value: dict[str, object]) -> bool:
         raw = deepcopy(value)
-        if raw.get("schemaVersion") != 1:
+        schema = raw.get("schemaVersion")
+        if schema not in {1, 2}:
             return False
         unit = raw.pop("energyUnit", None)
         if unit not in {"hartree", "kj/mol", "eV"}:
             return False
         images = raw.get("images")
-        if not isinstance(images, list) or len(images) < 2:
+        minimum = 1 if schema == 2 else 2
+        if not isinstance(images, list) or len(images) < minimum:
             return False
         for image in images:
             if not isinstance(image, dict):
@@ -375,6 +384,8 @@ class ReactionPathManifestGenerator:
             return "neb"
         if name.endswith("_IRC_Full_trj.xyz"):
             return "irc"
+        if name in {"optimization_trj.xyz", "optimization.out"}:
+            return "orca-optimization"
         raise ReactionPathError(
             "UNSUPPORTED_REACTION_PATH_SOURCE", f"Unsupported trajectory name: {name}"
         )
