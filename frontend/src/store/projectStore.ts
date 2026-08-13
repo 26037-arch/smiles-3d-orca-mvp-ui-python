@@ -3,7 +3,8 @@ import { inferBonds } from '../chem/bonds'
 import { changeAngle, changeDistance, threeAtomPlane } from '../chem/geometry'
 import { AO_REFERENCE_OPACITY } from '../chem/aoComposition'
 import { projectForReactionFrame } from '../chem/reactionPath'
-import type { Atom, Bond, CalculationKind, CalculationResult, MoleculeProject, ReactionPathPlayback, ReactionPathStatus, SketchPlane, SurfaceLayer, Tool, Vec3 } from '../types'
+import { overlayEndpointProject } from '../chem/reactionEndpoints'
+import type { Atom, Bond, CalculationKind, CalculationResult, MoleculeProject, ReactionEndpointView, ReactionPathPlayback, ReactionPathStatus, SketchPlane, SurfaceLayer, Tool, Vec3 } from '../types'
 
 const plane = (kind: 'XY' | 'YZ' | 'ZX', origin: Vec3, normal: Vec3, basisU: Vec3, basisV: Vec3): SketchPlane => ({
   id: crypto.randomUUID(), kind, atomIds: [], origin, normal, basisU, basisV, visible: kind === 'XY', active: kind === 'XY', valid: true,
@@ -42,6 +43,9 @@ export interface ProjectStore {
   aoOrbitalId?: string
   aoSurfaceSnapshot?: SurfaceLayer[]
   calculationKind: CalculationKind
+  reactionProduct?: MoleculeProject
+  reactionEndpointView: ReactionEndpointView
+  reactionImageCount: number
   reactionStatus: ReactionPathStatus
   reactionPath?: ReactionPathPlayback
   reactionProject?: MoleculeProject
@@ -82,6 +86,10 @@ export interface ProjectStore {
   enterAOMode(reference: SurfaceLayer): void
   exitAOMode(): void
   setCalculationKind(kind: CalculationKind): void
+  setReactionProduct(product?: MoleculeProject): void
+  setReactionEndpointView(view: ReactionEndpointView): void
+  setReactionImageCount(count: number): void
+  setLastCalculationId(id: string): void
   beginReactionPathLoad(): void
   applyReactionPath(playback: ReactionPathPlayback): void
   failReactionPath(message: string): void
@@ -111,15 +119,23 @@ const withCommand = (state: ProjectStore, project: MoleculeProject) => ({
 const structureTools = new Set<Tool>(['add', 'move', 'plane', 'bond-add', 'bond-delete'])
 
 function blockReactionEdit(state: ProjectStore, set: (patch: Partial<ProjectStore>) => void): boolean {
-  if (state.calculationKind !== 'reaction-path' || !state.reactionPath) return false
-  set({ reactionStatus: 'paused', reactionCopyPrompt: true })
-  return true
+  if (state.calculationKind !== 'reaction-path') return false
+  if (state.reactionPath) {
+    set({ reactionStatus: 'paused', reactionCopyPrompt: true })
+    return true
+  }
+  if (state.reactionEndpointView !== 'reactant') {
+    set({ notice: '생성물 미리보기는 읽기 전용입니다. 반응물 보기로 전환해 편집하세요.' })
+    return true
+  }
+  return false
 }
 
 export const useProjectStore = create<ProjectStore>((set, get) => ({
   project: newProject(), viewStructure: 'initial', selection: [], tool: 'select', addElement: 'C', toolAtoms: [],
   history: { past: [], future: [] }, surfaces: [], orbitEnabled: true, aoMode: false,
-  calculationKind: 'single', reactionStatus: 'idle', reactionFrameIndex: 0, reactionCopyPrompt: false,
+  calculationKind: 'single', reactionEndpointView: 'reactant', reactionImageCount: 8,
+  reactionStatus: 'idle', reactionFrameIndex: 0, reactionCopyPrompt: false,
   setTool: tool => {
     const state = get()
     if (state.reactionStatus === 'playing' && structureTools.has(tool)) {
@@ -209,7 +225,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   togglePlane: id => { const state = get(); if (blockReactionEdit(state, set)) return; set(withCommand(state, { ...state.project, sketchPlanes: state.project.sketchPlanes.map(p => p.id === id ? { ...p, visible: !p.visible } : p) })) },
   applyDistance: (ids, target) => { const state = get(); if (blockReactionEdit(state, set)) return; try { set(withCommand(state, { ...state.project, atoms: changeDistance(state.project.atoms, state.project.bonds, ...ids, target) })) } catch (e) { set({ error: (e as Error).message }) } },
   applyAngle: (ids, target, camera) => { const state = get(); if (blockReactionEdit(state, set)) return; try { set(withCommand(state, { ...state.project, atoms: changeAngle(state.project.atoms, state.project.bonds, ...ids, target, camera) })) } catch (e) { set({ error: (e as Error).message }) } },
-  setProject: project => set({ project: refreshPlanes(project), optimizedProject: undefined, viewStructure: 'initial', selection: [], history: { past: [], future: [] }, result: undefined, surfaces: [], aoMode: false, aoOrbitalId: undefined, aoSurfaceSnapshot: undefined, error: undefined, calculationKind: 'single', reactionStatus: 'idle', reactionPath: undefined, reactionProject: undefined, reactionFrameIndex: 0, reactionError: undefined, reactionCopyPrompt: false }),
+  setProject: project => set({ project: refreshPlanes(project), optimizedProject: undefined, viewStructure: 'initial', selection: [], history: { past: [], future: [] }, result: undefined, surfaces: [], aoMode: false, aoOrbitalId: undefined, aoSurfaceSnapshot: undefined, error: undefined, calculationKind: 'single', reactionProduct: undefined, reactionEndpointView: 'reactant', reactionStatus: 'idle', reactionPath: undefined, reactionProject: undefined, reactionFrameIndex: 0, reactionError: undefined, reactionCopyPrompt: false }),
   updateProject: patch => { const state = get(); set(withCommand(state, { ...state.project, ...patch })) },
   undo: () => { const state = get(); const previous = state.history.past.at(-1); if (previous) set({ project: previous, history: { past: state.history.past.slice(0, -1), future: [state.project, ...state.history.future] }, selection: [] }) },
   redo: () => { const state = get(); const next = state.history.future[0]; if (next) set({ project: next, history: { past: [...state.history.past, state.project], future: state.history.future.slice(1) }, selection: [] }) },
@@ -246,13 +262,36 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     toolAtoms: [],
     selection: [],
   })),
+  setReactionProduct: reactionProduct => set({
+    reactionProduct,
+    reactionEndpointView: reactionProduct ? 'product' : 'reactant',
+    reactionPath: undefined,
+    reactionProject: undefined,
+    reactionStatus: 'idle',
+    reactionError: undefined,
+    surfaces: [],
+    selection: [],
+  }),
+  setReactionEndpointView: reactionEndpointView => set({
+    reactionEndpointView,
+    selection: [],
+    toolAtoms: [],
+  }),
+  setReactionImageCount: reactionImageCount => {
+    if (!Number.isFinite(reactionImageCount)) return
+    set({ reactionImageCount: Math.max(1, Math.min(32, Math.round(reactionImageCount))) })
+  },
+  setLastCalculationId: lastCalculationId => set(state => ({
+    project: { ...state.project, lastCalculationId },
+  })),
   beginReactionPathLoad: () => set({ reactionStatus: 'loading-path', reactionError: undefined }),
   applyReactionPath: reactionPath => set(state => {
     const frame = reactionPath.displayFrames[0]
     return {
       calculationKind: 'reaction-path', reactionPath, reactionFrameIndex: 0,
       reactionProject: projectForReactionFrame(state.project, reactionPath.path, frame),
-      reactionStatus: 'paused', reactionError: undefined, surfaces: [], selection: [], toolAtoms: [],
+      reactionEndpointView: 'reactant', reactionStatus: 'paused', reactionError: undefined,
+      surfaces: [], selection: [], toolAtoms: [],
     }
   }),
   failReactionPath: reactionError => set({ reactionStatus: 'error', reactionError }),
@@ -276,6 +315,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     return {
       project, optimizedProject: undefined, viewStructure: 'initial', calculationKind: 'single',
       reactionStatus: 'idle', reactionPath: undefined, reactionProject: undefined,
+      reactionProduct: undefined, reactionEndpointView: 'reactant',
       reactionFrameIndex: 0, reactionCopyPrompt: false, reactionError: undefined,
       selection: [], toolAtoms: [], history: { past: [], future: [] }, surfaces: [], result: undefined,
       notice: '현재 경로 프레임을 새 단일 구조로 복사했습니다.',
@@ -286,4 +326,8 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
 export const visibleProject = (state: ProjectStore) => state.calculationKind === 'reaction-path' && state.reactionProject
   ? state.reactionProject
+  : state.calculationKind === 'reaction-path' && state.reactionProduct && state.reactionEndpointView === 'product'
+    ? state.reactionProduct
+    : state.calculationKind === 'reaction-path' && state.reactionProduct && state.reactionEndpointView === 'overlay'
+      ? overlayEndpointProject(state.project, state.reactionProduct)
   : state.viewStructure === 'optimized' && state.optimizedProject ? state.optimizedProject : state.project

@@ -4,7 +4,8 @@
 
 > 이 앱은 전역적으로 가장 안정한 구조를 찾지 않는다. 결과는 **입력 구조에서 찾은 국소 최적화 구조**다.
 
-반응 경로, NEB/IRC/전이상태, 분자동역학, 용매, 주기계, SMILES 구조 생성, conformer 전역 탐색은 이 MVP의 범위가 아니다.
+표준 ORCA NEB 반응 경로는 지원한다. IRC/전이상태 탐색, 분자동역학, 용매, 주기계,
+SMILES 구조 생성, conformer 전역 탐색은 이 MVP의 범위가 아니다.
 
 ## 화면에서 할 수 있는 일
 
@@ -96,11 +97,21 @@ XYZ에는 결합 정보가 없으므로 import 후 결합을 다시 추론한다
 
 ## 계산된 반응 경로 재생
 
-계산 설정의 `계산 종류`에서 `반응 경로`를 선택하면 현재 작업 폴더에서 최종 ORCA NEB
-`*_MEP_trj.xyz` 또는 양방향 IRC `*_IRC_Full_trj.xyz`를 찾는다. manifest가 없으면 같은 작업
-폴더의 `data/jobs/<UUID>/reaction-path.json`으로 자동 생성한다. `*_MEP_ALL_trj.xyz`와 부분 IRC
-trajectory는 최종 경로로 추측하지 않는다. 이 모드는 새로운 NEB·IRC 계산을 실행하지 않으며,
-표시 프레임은 실제 시간 trajectory가 아니다.
+계산 설정의 `계산 종류`에서 `반응 경로`를 선택하고 생성물 XYZ 또는 GeoORCA 프로젝트를
+불러오면, 현재 편집 구조를 반응물 snapshot으로 사용한다. 두 endpoint의 원자 수·인덱스별 원소·
+전하·다중도·전자 parity와 좌표를 검사한 뒤 반응물과 생성물을 순서대로 `r2SCAN-3c OPT`로
+최적화하고, 최적화된 endpoint 사이에서 IDPP 초기 경로를 사용하는 표준 ORCA NEB를 실행한다.
+UI의 `중간 이미지 수`는 고정된 두 endpoint를 제외한 ORCA `NImages` 값이다.
+
+NEB가 정상 종료·수렴하고 현재 reaction job 폴더에 최종 `reaction_MEP_trj.xyz`가 있을 때만
+기존 manifest generator가 `data/jobs/<reaction-job-id>/reaction-path.json`을 생성한다. 성공 직후
+프런트엔드는 같은 job ID의 reaction-path API를 자동 호출하므로 JSON 파일이나 경로를 사용자가
+고를 필요가 없다. `*_MEP_ALL_trj.xyz`는 최종 경로로 사용하지 않는다. 기존 trajectory를 다시
+읽는 버튼은 복구 기능으로 남아 있으며, 표시 프레임은 실제 시간 trajectory가 아니다.
+
+반응 경로 job은 `result.json`을 만들지 않는다. 단일 구조 job은 기존대로 `result.json`에 최종
+국소 최적화 구조와 전자구조를 저장하고, 반응 경로 job은 `reaction-path.json`에 모든 실제 NEB
+image와 에너지를 저장한다.
 
 자동 manifest는 UTF-8 JSON이며 `schemaVersion: 1`, `sourceType`, `sourceTrajectory`,
 `energyReference: first-image`, `energyUnit: hartree`, `relativeEnergyUnit: kJ/mol`, 원본 파일의

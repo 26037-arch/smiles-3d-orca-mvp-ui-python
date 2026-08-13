@@ -1,12 +1,16 @@
 import { useRef } from 'react'
 import { ChevronDown, FileDown, FilePlus2, FolderOpen, LoaderCircle, Pause, Play, Redo2, Save, Undo2 } from 'lucide-react'
 import { downloadText, parseProjectJson, projectToJson, projectToXyz, replaceFromXyz } from '../chem/serialization'
+import { validateReactionEndpoints } from '../chem/reactionEndpoints'
 import { newProject, useProjectStore } from '../store/projectStore'
-import type { Capabilities } from '../types'
+import type { Capabilities, JobRecord } from '../types'
 
-export function TopBar({ capabilities, job, onRun, onCancel }: { capabilities?: Capabilities; job?: any; onRun(mode: 'orca' | 'demo'): void; onCancel(): void }) {
+export function TopBar({ capabilities, job, onRun, onCancel }: { capabilities?: Capabilities; job?: JobRecord; onRun(mode: 'orca' | 'demo'): void; onCancel(): void }) {
   const input = useRef<HTMLInputElement>(null); const state = useProjectStore()
   const busy = job && ['QUEUED', 'RUNNING'].includes(job.state)
+  const endpointError = state.calculationKind === 'reaction-path'
+    ? validateReactionEndpoints(state.project, state.reactionProduct)
+    : undefined
   const open = async (file?: File) => {
     if (!file) return
     try { const text = await file.text(); state.setProject(file.name.toLowerCase().endsWith('.xyz') ? replaceFromXyz(newProject(), text) : parseProjectJson(text)) }
@@ -27,10 +31,9 @@ export function TopBar({ capabilities, job, onRun, onCancel }: { capabilities?: 
     <div className="run-actions">
       <span className={`status-pill ${job?.state?.toLowerCase() ?? 'idle'}`}>{busy && <LoaderCircle className="spin" />}{job?.state ?? 'IDLE'}{job?.progress ? ` ${Math.round(job.progress * 100)}%` : ''}</span>
       {busy ? <button className="danger" onClick={onCancel}><Pause /> 취소</button> : <>
-        <button className="primary" disabled={!capabilities?.calculation.available} onClick={() => onRun('orca')} title={capabilities?.calculation.reasons.join('\n')}><Play /> ORCA 계산</button>
-        {capabilities?.demo.available && <button className="demo" onClick={() => onRun('demo')}>데모 결과 <ChevronDown /></button>}
+        <button className="primary" disabled={!capabilities?.calculation.available || Boolean(endpointError)} onClick={() => onRun('orca')} title={endpointError ?? capabilities?.calculation.reasons.join('\n')}><Play /> ORCA 계산</button>
+        {capabilities?.demo.available && state.calculationKind === 'single' && <button className="demo" onClick={() => onRun('demo')}>데모 결과 <ChevronDown /></button>}
       </>}
     </div>
   </header>
 }
-

@@ -12,12 +12,15 @@ from uuid import UUID, uuid4
 from ..chemistry.opi_adapter import ChemistryError, OpiAdapter, _terminate_process_tree
 from ..config import LocalSettings
 from ..models import (
+    CalculationKind,
     CalculationResult,
+    JobCreate,
     JobMode,
     JobRecord,
     JobState,
     MoleculeProject,
     Orbital,
+    ReactionPathSettings,
 )
 from ..reaction_path import ReactionPathError
 from ..reaction_path.importer import ReactionPathManifestGenerator
@@ -96,7 +99,36 @@ class JobManager:
                 record.message = "이전 인코딩 오류 작업"
                 self._write_record(record)
 
-    def create(self, project: MoleculeProject, mode: JobMode) -> JobRecord:
+    def create_request(self, request: JobCreate) -> JobRecord:
+        if request.calculation_kind == CalculationKind.SINGLE:
+            if request.project is None:
+                raise ChemistryError("PROJECT_REQUIRED", "단일 구조 계산에는 project가 필요합니다")
+            return self.create(request.project, request.mode)
+        if request.mode != JobMode.ORCA:
+            raise ChemistryError(
+                "REACTION_PATH_REQUIRES_ORCA", "반응 경로 계산은 실제 ORCA 모드에서만 지원합니다"
+            )
+        if request.reactant is None:
+            raise ChemistryError("REACTANT_ENDPOINT_REQUIRED", "반응물이 필요합니다")
+        if request.product is None:
+            raise ChemistryError("PRODUCT_ENDPOINT_REQUIRED", "생성물이 필요합니다")
+        return self.create(
+            request.reactant,
+            request.mode,
+            calculation_kind=CalculationKind.REACTION_PATH,
+            product=request.product,
+            reaction_path_settings=request.reaction_path_settings,
+        )
+
+    def create(
+        self,
+        project: MoleculeProject,
+        mode: JobMode,
+        *,
+        calculation_kind: CalculationKind = CalculationKind.SINGLE,
+        product: MoleculeProject | None = None,
+        reaction_path_settings: ReactionPathSettings | None = None,
+    ) -> JobRecord:
         self._cleanup_completed_jobs()
         validation = validate_project(project)
         if not validation.valid:
@@ -104,20 +136,79 @@ class JobManager:
             raise ChemistryError("INVALID_PROJECT", detail)
         if mode == JobMode.DEMO and not self.settings.demo_calculations:
             raise ChemistryError("DEMO_DISABLED", "데모 계산 모드가 비활성화되어 있습니다")
+        if calculation_kind == CalculationKind.REACTION_PATH:
+            if product is None:
+                raise ChemistryError("PRODUCT_ENDPOINT_REQUIRED", "생성물이 필요합니다")
+            self._validate_endpoints(project, product)
         job_id = uuid4()
         job_dir = self._job_dir(job_id)
         job_dir.mkdir(parents=False)
-        (job_dir / "project.json").write_text(project.model_dump_json(indent=2, by_alias=True), encoding="utf-8")
+        project_json = project.model_dump_json(indent=2, by_alias=True)
+        (job_dir / "project.json").write_text(project_json, encoding="utf-8")
+        if calculation_kind == CalculationKind.REACTION_PATH:
+            assert product is not None
+            (job_dir / "reactant-project.json").write_text(project_json, encoding="utf-8")
+            (job_dir / "product-project.json").write_text(
+                product.model_dump_json(indent=2, by_alias=True), encoding="utf-8"
+            )
+            _write_project_xyz(job_dir / "reactant-input.xyz", project)
+            _write_project_xyz(job_dir / "product-input.xyz", product)
         atom_map = {str(atom.id): index for index, atom in enumerate(project.atoms)}
         record = JobRecord(
             id=job_id, state=JobState.QUEUED, mode=mode, created_at=now(), updated_at=now(),
-            message="대기 중", atom_index_map=atom_map,
+            message="대기 중", atom_index_map=atom_map, calculationKind=calculation_kind,
         )
         self._write_record(record)
         event = threading.Event()
         self.cancel_events[job_id] = event
-        self.executor.submit(self._run, job_id, project, mode, event)
+        self.executor.submit(
+            self._run,
+            job_id,
+            project,
+            mode,
+            event,
+            calculation_kind,
+            product,
+            reaction_path_settings or ReactionPathSettings(),
+        )
         return record
+
+    @staticmethod
+    def _validate_endpoints(reactant: MoleculeProject, product: MoleculeProject) -> None:
+        if len(reactant.atoms) != len(product.atoms):
+            raise ChemistryError(
+                "ENDPOINT_ATOM_COUNT_MISMATCH",
+                f"반응물은 {len(reactant.atoms)}개, 생성물은 {len(product.atoms)}개 원자입니다",
+            )
+        for index, (left, right) in enumerate(
+            zip(reactant.atoms, product.atoms, strict=True), start=1
+        ):
+            if left.element != right.element:
+                raise ChemistryError(
+                    "ENDPOINT_ELEMENT_ORDER_MISMATCH",
+                    f"생성물 {index}번 원자는 {right.element}이지만 반응물 {index}번 원자는 "
+                    f"{left.element}입니다. 반응물과 생성물의 원자 순서를 동일하게 맞춰 주세요.",
+                )
+        if reactant.total_charge != product.total_charge:
+            raise ChemistryError(
+                "ENDPOINT_CHARGE_MISMATCH", "반응물과 생성물의 전체 전하가 다릅니다"
+            )
+        if reactant.multiplicity != product.multiplicity:
+            raise ChemistryError(
+                "ENDPOINT_MULTIPLICITY_MISMATCH", "반응물과 생성물의 다중도가 다릅니다"
+            )
+        validation = validate_project(product)
+        if not validation.valid:
+            detail = "; ".join(m.message for m in validation.messages if m.level == "error")
+            raise ChemistryError("INVALID_PRODUCT_ENDPOINT", detail)
+        identical = all(
+            all(abs(a - b) <= 1e-12 for a, b in zip(left.position, right.position, strict=True))
+            for left, right in zip(reactant.atoms, product.atoms, strict=True)
+        )
+        if identical:
+            raise ChemistryError(
+                "IDENTICAL_REACTION_ENDPOINTS", "반응물과 생성물 좌표가 동일합니다"
+            )
 
     def _cleanup_completed_jobs(self) -> None:
         entries: list[tuple[float, Path, int]] = []
@@ -154,6 +245,11 @@ class JobManager:
         record = self.get(job_id)
         if record.state != JobState.SUCCEEDED:
             raise ChemistryError("RESULT_NOT_READY", f"작업 상태가 {record.state}입니다")
+        if record.calculation_kind == CalculationKind.REACTION_PATH:
+            raise ChemistryError(
+                "RESULT_NOT_AVAILABLE_FOR_REACTION_PATH",
+                "반응 경로 작업은 result.json 대신 reaction-path.json을 사용합니다",
+            )
         return CalculationResult.model_validate_json(
             (self._job_dir(job_id) / "result.json").read_text(encoding="utf-8")
         )
@@ -189,11 +285,54 @@ class JobManager:
             stream.write(f"[{now()}] {message}\n")
         self._update(job_id, message=message)
 
-    def _run(self, job_id: UUID, project: MoleculeProject, mode: JobMode, cancel: threading.Event) -> None:
+    def _run(
+        self,
+        job_id: UUID,
+        project: MoleculeProject,
+        mode: JobMode,
+        cancel: threading.Event,
+        calculation_kind: CalculationKind = CalculationKind.SINGLE,
+        product: MoleculeProject | None = None,
+        reaction_path_settings: ReactionPathSettings | None = None,
+    ) -> None:
         if cancel.is_set():
             return
         try:
             self._update(job_id, state=JobState.RUNNING, progress=0.05, message="시작")
+            if calculation_kind == CalculationKind.REACTION_PATH:
+                if not self.settings.orca_path:
+                    raise ChemistryError("ORCA_UNAVAILABLE", "ORCA 경로가 설정되지 않았습니다")
+                if product is None:
+                    raise ChemistryError("PRODUCT_ENDPOINT_REQUIRED", "생성물이 필요합니다")
+                adapter = OpiAdapter(log=lambda m: self._log(job_id, m))
+
+                def stage(progress: float, message: str) -> None:
+                    self._log(job_id, message)
+                    self._update(job_id, progress=progress)
+
+                adapter.run_reaction_path(
+                    project,
+                    product,
+                    self._job_dir(job_id),
+                    settings=reaction_path_settings or ReactionPathSettings(),
+                    orca_path=self.settings.orca_path,
+                    cancel_event=cancel,
+                    process_started=lambda process: self.processes.__setitem__(job_id, process),
+                    stage=stage,
+                )
+                if cancel.is_set():
+                    raise ChemistryError("CANCELLED", "사용자가 계산을 취소했습니다")
+                stage(0.94, "반응 경로 데이터 변환")
+                try:
+                    ReactionPathManifestGenerator().ensure(self._job_dir(job_id))
+                except ReactionPathError as exc:
+                    if exc.code == "FINAL_NEB_TRAJECTORY_MISSING":
+                        raise ChemistryError(exc.code, exc.detail) from exc
+                    raise ChemistryError(
+                        "REACTION_PATH_MANIFEST_FAILED", f"[{exc.code}] {exc.detail}"
+                    ) from exc
+                self._update(job_id, state=JobState.SUCCEEDED, progress=1, message="완료")
+                return
             if mode == JobMode.DEMO:
                 result = self._demo(job_id, project, cancel)
             else:
@@ -277,3 +416,13 @@ def _atomic_number(symbol: str) -> int:
     from ..models import ATOMIC_NUMBERS
 
     return ATOMIC_NUMBERS[symbol]
+
+
+def _write_project_xyz(path: Path, project: MoleculeProject) -> None:
+    lines = [str(len(project.atoms)), project.name]
+    lines.extend(
+        f"{atom.element} {atom.position[0]:.12f} {atom.position[1]:.12f} "
+        f"{atom.position[2]:.12f}"
+        for atom in project.atoms
+    )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")

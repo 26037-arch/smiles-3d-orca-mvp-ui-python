@@ -4,6 +4,7 @@ __pycache__/
 .ruff_cache/
 test-artifacts/
 .test-tmp/
+.codex-test-temp/
 *.pyc
 node_modules/
 frontend/dist/

@@ -27,9 +27,10 @@ function BondMesh({ bond, atoms }: { bond: Bond; atoms: Atom[] }) {
 
 function AtomMesh({ atom }: { atom: Atom }) {
   const selected = useProjectStore(s => s.selection.includes(atom.id)); const select = useProjectStore(s => s.selectAtom); const tool = useProjectStore(s => s.tool)
+  const productPreview = atom.id.startsWith('product-preview-')
   return <mesh position={atom.position} onPointerDown={(e: ThreeEvent<PointerEvent>) => { e.stopPropagation(); select(atom.id, e.ctrlKey || e.shiftKey) }} castShadow>
     <sphereGeometry args={[Math.max(.24, ELEMENTS[atom.element].radius * .35), 32, 20]} />
-    <meshStandardMaterial color={ELEMENTS[atom.element].color} emissive={selected ? '#55d6ff' : '#000'} emissiveIntensity={selected ? .7 : 0} roughness={.3} metalness={.05} />
+    <meshStandardMaterial color={ELEMENTS[atom.element].color} transparent={productPreview} opacity={productPreview ? .48 : 1} emissive={selected || productPreview ? '#55d6ff' : '#000'} emissiveIntensity={selected ? .7 : productPreview ? .25 : 0} roughness={.3} metalness={.05} />
     {(selected || tool === 'distance' || tool === 'angle') && <Html center distanceFactor={8} position={[0, .42, 0]} className="atom-label"><span>{atom.element}</span><small>{atom.id.slice(0, 4)}</small></Html>}
   </mesh>
 }
@@ -145,6 +146,7 @@ export function ReactionPathControls() {
   const setFrame = useProjectStore(s => s.setReactionFrame)
   const setPlaying = useProjectStore(s => s.setReactionPlaying)
   const error = useProjectStore(s => s.reactionError)
+  const reactionProduct = useProjectStore(s => s.reactionProduct)
   const selectedOrbital = useProjectStore(s => s.selectedOrbital)
   const result = useProjectStore(s => s.result)
   const [orbitalTrack, setOrbitalTrack] = useState<{ active: boolean; loading: boolean; error?: string; frameSurfaces?: Record<string, Record<string, string>> }>({ active: true, loading: false })
@@ -216,8 +218,8 @@ export function ReactionPathControls() {
   if (!playback) {
     const notFound = !error || error.startsWith('REACTION_PATH_NOT_FOUND')
     return <div className="reaction-empty" role="status">
-      <strong>{notFound ? '지원되는 반응 경로 결과가 없습니다.' : '반응 경로 결과는 있지만 형식 검증에 실패했습니다.'}</strong>
-      <span>{status === 'loading-path' ? '기존 ORCA 결과를 찾는 중입니다…' : notFound ? '필요한 파일: *_MEP_trj.xyz 또는 *_IRC_Full_trj.xyz' : 'trajectory의 원자 수, 원소 순서와 좌표를 확인하세요.'}</span>
+      <strong>{reactionProduct && !error ? '반응물과 생성물 endpoint를 준비했습니다.' : notFound ? '지원되는 반응 경로 결과가 없습니다.' : '반응 경로 결과는 있지만 형식 검증에 실패했습니다.'}</strong>
+      <span>{status === 'loading-path' ? 'endpoint 최적화와 ORCA NEB 계산을 준비하거나 기존 결과를 찾는 중입니다…' : reactionProduct && !error ? '검증이 완료되면 ORCA 계산을 실행하세요.' : notFound ? '필요한 파일: *_MEP_trj.xyz 또는 *_IRC_Full_trj.xyz' : 'trajectory의 원자 수, 원소 순서와 좌표를 확인하세요.'}</span>
       {error && !notFound && <em>세부 정보: {error}</em>}
     </div>
   }

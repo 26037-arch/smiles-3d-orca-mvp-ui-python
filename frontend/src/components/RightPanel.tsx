@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Activity, Atom as AtomIcon, CheckCircle2, ChevronDown, CircleAlert, Eye, EyeOff, FlaskConical, Layers3, Plus, RefreshCcw, Settings2, Trash2 } from 'lucide-react'
+import { Activity, Atom as AtomIcon, CheckCircle2, ChevronDown, CircleAlert, Eye, EyeOff, FlaskConical, FolderOpen, Layers3, Plus, RefreshCcw, Settings2, Trash2 } from 'lucide-react'
 import { api } from '../api/client'
 import { ELEMENTS, normalizeElement } from '../chem/elements'
 import { createSurfaceLayer, frontierOrbitals, orbitalOptionLabel, selectedOrbitalIdForBrowser, surfaceRequestForLayer, toggleSurfaceLayer } from '../chem/orbitals'
 import { AO_PAGE_SIZE, appendCompositionItems, createBasisSurfaceLayer, deselectIncomingBasis, initialBasisSelection, isCurrentAORequest } from '../chem/aoComposition'
+import { productProjectFromXyz, validateReactionEndpoints } from '../chem/reactionEndpoints'
+import { parseProjectJson } from '../chem/serialization'
 import { useProjectStore, visibleProject } from '../store/projectStore'
 import type { BasisContribution, Capabilities, Orbital, OrbitalComposition, SurfaceLayer, Vec3 } from '../types'
 
@@ -30,16 +32,24 @@ function CalculationSettings({ capabilities }: { capabilities?: Capabilities }) 
   const setNotice = useProjectStore(s => s.setNotice); const setError = useProjectStore(s => s.setError)
   const calculationKind = useProjectStore(s => s.calculationKind); const setCalculationKind = useProjectStore(s => s.setCalculationKind)
   const reactionStatus = useProjectStore(s => s.reactionStatus); const reactionError = useProjectStore(s => s.reactionError)
+  const reactionProduct = useProjectStore(s => s.reactionProduct); const setReactionProduct = useProjectStore(s => s.setReactionProduct)
+  const reactionEndpointView = useProjectStore(s => s.reactionEndpointView); const setReactionEndpointView = useProjectStore(s => s.setReactionEndpointView)
+  const reactionImageCount = useProjectStore(s => s.reactionImageCount); const setReactionImageCount = useProjectStore(s => s.setReactionImageCount)
   const result = useProjectStore(s => s.result)
   const pathRequest = useRef<AbortController | undefined>(undefined)
+  const productXyzInput = useRef<HTMLInputElement>(null)
+  const productProjectInput = useRef<HTMLInputElement>(null)
   const [presets, setPresets] = useState<any[]>([]); useEffect(() => { api.presets().then(setPresets).catch(() => {}) }, [])
   const [orcaPath, setOrcaPath] = useState(capabilities?.orca.path ?? '')
   useEffect(() => setOrcaPath(capabilities?.orca.path ?? ''), [capabilities?.orca.path])
   const electrons = project.atoms.reduce((sum, atom) => sum + ELEMENTS[atom.element].atomicNumber, 0) - project.totalCharge
   const parityOk = electrons % 2 === (project.multiplicity - 1) % 2
+  const endpointError = calculationKind === 'reaction-path'
+    ? validateReactionEndpoints(project, reactionProduct)
+    : undefined
   const savePath = async () => { try { await api.setOrcaPath(orcaPath.trim() || null); setNotice('ORCA 경로를 로컬 설정에 저장했습니다.'); window.setTimeout(() => window.location.reload(), 400) } catch (e) { setError((e as Error).message) } }
   useEffect(() => () => pathRequest.current?.abort(), [])
-  const reactionJobId = result?.job_id ?? project.lastCalculationId
+  const reactionJobId = project.lastCalculationId ?? result?.job_id
   const loadReactionPath = useCallback(async () => {
     const jobId = reactionJobId
     if (!jobId) return setError('반응 경로를 읽을 계산 작업이 없습니다.')
@@ -55,11 +65,19 @@ function CalculationSettings({ capabilities }: { capabilities?: Capabilities }) 
       useProjectStore.getState().failReactionPath((error as Error).message)
     }
   }, [reactionJobId, setError])
-  useEffect(() => {
-    if (calculationKind === 'reaction-path' && reactionJobId && reactionStatus === 'idle') {
-      void loadReactionPath()
+  const loadProduct = async (file?: File, kind?: 'xyz' | 'project') => {
+    if (!file) return
+    try {
+      const text = await file.text()
+      const product = kind === 'xyz'
+        ? productProjectFromXyz(project, text, file.name.replace(/\.xyz$/i, ''))
+        : parseProjectJson(text)
+      setReactionProduct(product)
+      setNotice(`${file.name}을 생성물 endpoint로 불러왔습니다.`)
+    } catch (error) {
+      setError((error as Error).message)
     }
-  }, [calculationKind, loadReactionPath, reactionJobId, reactionStatus])
+  }
   return <div className="settings-grid">
     <label className="full">계산 종류<div className="calculation-kind" role="group" aria-label="계산 종류">
       <button className={calculationKind === 'single' ? 'active' : ''} onClick={() => { pathRequest.current?.abort(); setCalculationKind('single') }}>단일 구조</button>
@@ -69,8 +87,15 @@ function CalculationSettings({ capabilities }: { capabilities?: Capabilities }) 
     <label>스핀 다중도<input type="number" min="1" max="20" value={project.multiplicity} onChange={e => update({ multiplicity: Number(e.target.value) })} /></label>
     <label className="full">계산 프리셋<select value={project.calculationPreset} onChange={e => update({ calculationPreset: e.target.value })}>{presets.map(p => <option key={p.id} value={p.id}>{p.name} · 비용 {p.cost}</option>)}</select></label>
     {calculationKind === 'reaction-path' && <div className="reaction-import full">
-      <button className="wide" disabled={reactionStatus === 'loading-path'} onClick={() => void loadReactionPath()}>{reactionStatus === 'loading-path' ? '경로 찾는 중…' : '현재 작업에서 반응 경로 찾기'}</button>
-      <p className="help">작업 폴더의 *_MEP_trj.xyz 또는 *_IRC_Full_trj.xyz를 자동 감지합니다. JSON 파일을 직접 선택할 필요가 없습니다.</p>
+      <div className="endpoint-card"><strong>반응물</strong><span>현재 편집 중인 구조 · {project.atoms.length}개 원자</span><button className={reactionEndpointView === 'reactant' ? 'active' : ''} onClick={() => setReactionEndpointView('reactant')}><Eye /> 반응물 보기</button></div>
+      <div className="endpoint-card"><strong>생성물</strong><span>{reactionProduct ? `${reactionProduct.name} · ${reactionProduct.atoms.length}개 원자` : '선택되지 않음'}</span><div><button onClick={() => productXyzInput.current?.click()}><FolderOpen /> XYZ 불러오기</button><button onClick={() => productProjectInput.current?.click()}><FolderOpen /> GeoORCA 프로젝트</button></div><input ref={productXyzInput} hidden type="file" accept=".xyz" onChange={event => void loadProduct(event.target.files?.[0], 'xyz')} /><input ref={productProjectInput} hidden type="file" accept=".json,.geoorca.json" onChange={event => void loadProduct(event.target.files?.[0], 'project')} /></div>
+      {reactionProduct && <div className="endpoint-preview-actions"><button className={reactionEndpointView === 'reactant' ? 'active' : ''} onClick={() => setReactionEndpointView('reactant')}>반응물 보기</button><button className={reactionEndpointView === 'product' ? 'active' : ''} onClick={() => setReactionEndpointView('product')}>생성물 보기</button><button className={reactionEndpointView === 'overlay' ? 'active' : ''} onClick={() => setReactionEndpointView('overlay')}>겹쳐 보기</button><button className="danger-ghost" onClick={() => setReactionProduct()}>생성물 제거</button></div>}
+      <label className="endpoint-images">중간 이미지 수<input type="number" min="1" max="32" value={reactionImageCount} onChange={event => setReactionImageCount(Number(event.target.value))} /></label>
+      <p className="help">ORCA NImages 값입니다. 고정된 반응물·생성물 endpoint는 이 수에 포함되지 않습니다. 초기 경로는 IDPP로 생성합니다.</p>
+      <p className="help">XYZ에는 전하·다중도가 없으므로 현재 설정({project.totalCharge}, {project.multiplicity})을 사용합니다.</p>
+      <div className={`validation-line ${endpointError ? 'bad' : 'ok'}`}>{endpointError ? <CircleAlert /> : <CheckCircle2 />}{endpointError ?? 'endpoint 원자 순서·전하·다중도 검증 완료'}</div>
+      {reactionJobId && <button className="wide" disabled={reactionStatus === 'loading-path'} onClick={() => void loadReactionPath()}>{reactionStatus === 'loading-path' ? '경로 찾는 중…' : '현재 작업에서 반응 경로 다시 불러오기'}</button>}
+      <p className="help">계산 완료 후 reaction-path.json은 자동으로 생성·로드됩니다.</p>
       {reactionError && <p className="inline-error">{reactionError}</p>}
     </div>}
     <div className={`validation-line full ${parityOk ? 'ok' : 'bad'}`}>{parityOk ? <CheckCircle2 /> : <CircleAlert />}전자 수 {electrons} · {parityOk ? '다중도 parity 일치' : '전하·다중도 parity 불일치'}</div>

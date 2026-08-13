@@ -51,6 +51,33 @@ export interface MoleculeProject {
 
 export type OrbitalSpin = 'restricted' | 'alpha' | 'beta'
 export type CalculationKind = 'single' | 'reaction-path'
+export type ReactionEndpointView = 'reactant' | 'product' | 'overlay'
+
+export interface ReactionPathSettings {
+  interpolation: 'idpp'
+  imageCount: number
+}
+
+export type JobCreateRequest =
+  | { mode: 'orca' | 'demo'; calculationKind?: 'single'; project: MoleculeProject }
+  | {
+      mode: 'orca'
+      calculationKind: 'reaction-path'
+      reactant: MoleculeProject
+      product: MoleculeProject
+      reactionPathSettings: ReactionPathSettings
+    }
+
+export interface JobRecord {
+  id: string
+  state: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED'
+  mode: 'orca' | 'demo'
+  calculationKind: CalculationKind
+  progress: number
+  message: string
+  error_code?: string | null
+  error_detail?: string | null
+}
 export type ReactionPathStatus = 'idle' | 'loading-path' | 'ready' | 'loading-orbitals' | 'preparing-display-frames' | 'playing' | 'paused' | 'error'
 
 export interface CalculatedImageAtom {

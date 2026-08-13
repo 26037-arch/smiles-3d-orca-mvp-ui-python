@@ -141,9 +141,36 @@ class JobMode(StrEnum):
     DEMO = "demo"
 
 
+class CalculationKind(StrEnum):
+    SINGLE = "single"
+    REACTION_PATH = "reaction-path"
+
+
+class ReactionPathSettings(StrictModel):
+    interpolation: Literal["idpp"] = "idpp"
+    image_count: int = Field(default=8, alias="imageCount", ge=1, le=32)
+
+
 class JobCreate(StrictModel):
-    project: MoleculeProject
     mode: JobMode = JobMode.ORCA
+    calculation_kind: CalculationKind = Field(
+        default=CalculationKind.SINGLE, alias="calculationKind"
+    )
+    project: MoleculeProject | None = None
+    reactant: MoleculeProject | None = None
+    product: MoleculeProject | None = None
+    reaction_path_settings: ReactionPathSettings = Field(
+        default_factory=ReactionPathSettings, alias="reactionPathSettings"
+    )
+
+    @model_validator(mode="after")
+    def payload_matches_calculation_kind(self) -> "JobCreate":
+        if self.calculation_kind == CalculationKind.SINGLE:
+            if self.reactant is not None or self.product is not None:
+                raise ValueError("single 작업에는 project만 사용할 수 있습니다")
+        elif self.project is not None:
+            raise ValueError("reaction-path 작업에는 reactant와 product를 사용해야 합니다")
+        return self
 
 
 class JobState(StrEnum):
@@ -158,6 +185,9 @@ class JobRecord(StrictModel):
     id: UUID
     state: JobState
     mode: JobMode
+    calculation_kind: CalculationKind = Field(
+        default=CalculationKind.SINGLE, alias="calculationKind"
+    )
     created_at: str
     updated_at: str
     progress: float = 0

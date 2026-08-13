@@ -106,7 +106,7 @@ def project_validate(project: MoleculeProject):
 @router.post("/jobs", status_code=202)
 def create_job(body: JobCreate, request: Request):
     try:
-        return manager(request).create(body.project, body.mode)
+        return manager(request).create_request(body)
     except ChemistryError as exc:
         raise error(422, exc.code, exc.detail) from exc
 

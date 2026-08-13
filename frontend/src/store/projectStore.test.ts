@@ -99,6 +99,20 @@ describe('reaction path state', () => {
     expect(useProjectStore.getState().calculationKind).toBe('reaction-path')
   })
 
+  it('keeps the product endpoint separate and previews it without overwriting the reactant', () => {
+    const reactant = newProject(); reactant.atoms = [
+      { id: 'a', element: 'H', position: [0, 0, 0] },
+      { id: 'b', element: 'H', position: [.7, 0, 0] },
+    ]
+    const product = structuredClone(reactant); product.atoms[1].position = [1.1, 0, 0]
+    useProjectStore.getState().setProject(reactant)
+    useProjectStore.getState().setCalculationKind('reaction-path')
+    useProjectStore.getState().setReactionProduct(product)
+    expect(useProjectStore.getState().project.atoms[1].position[0]).toBe(.7)
+    expect(useProjectStore.getState().reactionProduct?.atoms[1].position[0]).toBe(1.1)
+    expect(useProjectStore.getState().reactionEndpointView).toBe('product')
+  })
+
   it('synchronizes slider frames and distinguishes calculated frames', () => {
     const project = newProject(); project.atoms = [
       { id: 'a', element: 'H', position: [0, 0, 0] }, { id: 'b', element: 'H', position: [.7, 0, 0] },
