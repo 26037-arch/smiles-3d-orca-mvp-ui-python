@@ -56,7 +56,7 @@ def _contained_reference(job_dir: Path, reference: str, *, require_exists: bool 
 
 
 class ReactionPathService:
-    TRACKING_VERSION = "signed-overlap-v2"
+    TRACKING_VERSION = "signed-overlap-v3"
 
     def __init__(
         self,
@@ -83,6 +83,14 @@ class ReactionPathService:
             getattr(settings, "max_ram_overlap_entries", 512)
         )
         self._tracking_lock = threading.RLock()
+        # Per-job RLock to serialize tracking work (metadata, surface prep, frame surface, release)
+        self._tracking_job_locks_guard = threading.Lock()
+        self._tracking_job_locks: dict[UUID, threading.RLock] = {}
+
+    def _tracking_job_lock(self, job_id: UUID) -> threading.RLock:
+        """Get or create the per-job RLock for tracking work serialization."""
+        with self._tracking_job_locks_guard:
+            return self._tracking_job_locks.setdefault(job_id, threading.RLock())
 
     def load(self, job_id: UUID) -> ReactionPathPlayback:
         job_dir = self.jobs._job_dir(job_id)
@@ -313,27 +321,52 @@ class ReactionPathService:
         tracking_id: str,
         isovalue: float = 0.03,
     ) -> dict[str, object]:
+        with self._tracking_job_lock(job_id):
+            return self._prepare_tracking_surfaces_locked(job_id, tracking_id, isovalue)
+
+    def _prepare_tracking_surfaces_locked(
+        self,
+        job_id: UUID,
+        tracking_id: str,
+        isovalue: float = 0.03,
+    ) -> dict[str, object]:
         playback = self.load(job_id)
         metadata = self._tracking_metadata(self.jobs._job_dir(job_id), tracking_id)
         tracked = {item["geometry"]: item for item in metadata["steps"]}
         prepared: list[dict[str, object]] = []
         skipped = 0
         all_hit = True
+        
         for frame_index, frame in enumerate(playback.display_frames):
             if frame.left_image_index not in tracked or frame.right_image_index not in tracked:
                 skipped += 1
                 continue
+            
             try:
-                payload = self.tracking_frame_surface(job_id, tracking_id, frame_index, isovalue)
-            except ReactionPathError:
-                skipped += 1
-                continue
+                # Call unlocked version since we already hold the per-job lock
+                payload = self._tracking_frame_surface_locked(job_id, tracking_id, frame_index, isovalue)
+            except ReactionPathError as exc:
+                # Only skip if the frame itself is not available for tracking (not a systemic error)
+                if exc.code == "TRACKING_NOT_AVAILABLE_FOR_FRAME":
+                    skipped += 1
+                    continue
+                # Re-raise systemic errors
+                raise
+            
             prepared.append({
                 "frameIndex": frame_index,
                 "meshUrls": payload["meshUrls"],
                 "cacheHit": bool(payload["cacheHit"]),
             })
             all_hit = all_hit and bool(payload["cacheHit"])
+        
+        # Don't return success if no frames were prepared
+        if len(prepared) == 0:
+            raise ReactionPathError(
+                "NO_TRACKING_SURFACES_PREPARED",
+                f"No surfaces could be prepared for tracking {tracking_id}: skipped {skipped} frames"
+            )
+        
         return {
             "trackingId": tracking_id,
             "isovalue": isovalue,
@@ -348,17 +381,30 @@ class ReactionPathService:
         job_id: UUID,
         tracking_id: str,
     ) -> dict[str, object]:
-        job_dir = self.jobs._job_dir(job_id)
-        directory = self._tracking_directory(job_dir)
-        removed = 0
-        for candidate in list(directory.iterdir()):
-            if candidate.is_file() and candidate.suffix.lower() in {".ply", ".json"}:
+        """
+        Release tracking surfaces.
+        
+        For safety, only remove the tracking metadata file.
+        PLY files are managed by the bounded LRU cache eviction.
+        
+        This prevents accidental deletion of other tracking's data
+        and allows the cache to naturally age out old surfaces.
+        """
+        with self._tracking_job_lock(job_id):
+            job_dir = self.jobs._job_dir(job_id)
+            directory = self._tracking_directory(job_dir)
+            removed = 0
+            
+            # Only delete the metadata file for this tracking
+            metadata_file = directory / f"{tracking_id}.json"
+            if metadata_file.is_file():
                 try:
-                    candidate.unlink()
+                    metadata_file.unlink()
                     removed += 1
                 except OSError:
-                    continue
-        return {"trackingId": tracking_id, "released": removed}
+                    pass
+            
+            return {"trackingId": tracking_id, "released": removed}
 
     def tracking_frame_surface(
         self,
@@ -367,6 +413,24 @@ class ReactionPathService:
         frame_index: int,
         isovalue: float = 0.03,
     ) -> dict[str, object]:
+        """
+        Public entry point for tracking frame surface generation.
+        Acquires per-job lock to serialize with other tracking operations.
+        """
+        with self._tracking_job_lock(job_id):
+            return self._tracking_frame_surface_locked(job_id, tracking_id, frame_index, isovalue)
+
+    def _tracking_frame_surface_locked(
+        self,
+        job_id: UUID,
+        tracking_id: str,
+        frame_index: int,
+        isovalue: float = 0.03,
+    ) -> dict[str, object]:
+        """
+        Internal method for tracking frame surface generation.
+        Must be called with per-job lock already held.
+        """
         playback = self.load(job_id)
         if frame_index < 0 or frame_index >= len(playback.display_frames):
             raise ReactionPathError("FRAME_INDEX_OUT_OF_RANGE", str(frame_index))

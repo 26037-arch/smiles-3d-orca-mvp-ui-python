@@ -2,15 +2,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
+import os
+import threading
+import tempfile
 from pathlib import Path
 
 import numpy as np
 
 from .cube import CubeData
 
+logger = logging.getLogger(__name__)
 
 MESH_CACHE_VERSION = "cube-parser-v4"
+
+# Process-wide VTK serialization lock to prevent concurrent PyVista operations
+# PyVista/VTK can be sensitive to concurrent mesh generation in the same Python process
+_VTK_LOCK = threading.Lock()
 
 
 def cache_key(
@@ -24,10 +33,30 @@ def cache_key(
 
 
 def contour_to_ply(cube: CubeData, isovalue: float, output: Path) -> None:
+    """
+    Generate an isosurface PLY mesh from a cube field.
+    
+    Uses atomic publication: writes to a temporary file first,
+    then renames to the final location only on success.
+    """
+    with _VTK_LOCK:
+        _contour_to_ply_locked(cube, isovalue, output)
+
+
+def _contour_to_ply_locked(
+    cube: CubeData,
+    isovalue: float,
+    output: Path,
+) -> None:
+    """
+    Internal implementation of contour generation.
+    Must be called with _VTK_LOCK already held.
+    """
     try:
         import pyvista as pv
     except ImportError as exc:
         raise RuntimeError("PyVista/VTK가 설치되지 않아 등밀도면을 만들 수 없습니다") from exc
+    
     level = abs(isovalue)
     boundary_values = np.concatenate(
         [
@@ -45,27 +74,77 @@ def contour_to_ply(cube: CubeData, isovalue: float, output: Path) -> None:
             f"Isovalue {level:g} reaches the Cube grid boundary "
             f"(boundary max |field|={boundary_max:.6g}). Increase the isovalue."
         )
-
+    
     nx, ny, nz = cube.shape
-    i, j, k = np.meshgrid(np.arange(nx), np.arange(ny), np.arange(nz), indexing="ij")
+    
+    # Create mesh grid
+    i, j, k = np.meshgrid(
+        np.arange(nx),
+        np.arange(ny),
+        np.arange(nz),
+        indexing="ij",
+    )
+
+    # Compute points in real space
     points = (
         cube.origin
         + i[..., None] * cube.axes[0]
         + j[..., None] * cube.axes[1]
         + k[..., None] * cube.axes[2]
     )
+
+    # Create structured grid
     grid = pv.StructuredGrid(
         points[..., 0],
         points[..., 1],
         points[..., 2],
     )
+    del points, i, j, k  # Free large temporary arrays
+
+    # Assign field values
     grid["field"] = cube.values.ravel(order="F")
+
+    # Generate isosurface
     mesh = grid.contour([isovalue], scalars="field")
+    del grid  # Free grid after contour extraction
+
     if mesh.n_points == 0:
         raise ValueError("요청한 등밀도값에서 표면이 비어 있습니다")
+
+    # Compute normals for rendering
     mesh = mesh.compute_normals()
     mesh.clear_data()
-    mesh.save(output, binary=True)
+
+    # Atomic publication: write to temp file first, then rename
+    output.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Use a temp file in the same directory to ensure atomic rename
+    temp_fd, temp_path = tempfile.mkstemp(
+        prefix=f".{output.stem}.",
+        suffix=".ply",
+        dir=output.parent,
+    )
+    try:
+        # Convert fd to Path and close it (mesh.save will create its own handle)
+        os.close(temp_fd)
+        temp_file = Path(temp_path)
+        
+        # Save to temporary file
+        mesh.save(temp_file, binary=True)
+        
+        # Atomic rename to final location
+        # os.replace works atomically on POSIX and Windows
+        os.replace(str(temp_file), str(output))
+        
+    except Exception as exc:
+        # Clean up temp file on failure
+        try:
+            Path(temp_path).unlink()
+        except Exception:
+            pass
+        raise
+    finally:
+        del mesh  # Free mesh after writing
 
 
 def demo_surface_ply(output: Path, *, field: str, sign: int = 1, orbital: int = 0) -> None:

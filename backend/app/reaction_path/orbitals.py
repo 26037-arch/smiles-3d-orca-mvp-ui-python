@@ -61,28 +61,114 @@ def transformed_common_grid(
     cubes: list[CubeData],
     transforms: list[tuple[np.ndarray, np.ndarray, np.ndarray]],
     padding: float = 2.0,
+    max_grid_voxels: int = 10_000_000,  # ~215³ voxels, configurable safety limit
 ) -> CubeData:
+    """
+    Compute a common grid for multiple transformed cubes.
+    
+    Args:
+        cubes: List of input cube objects
+        transforms: List of (rotation, moving_center, reference_center) tuples
+        padding: Extra padding around the grid in Angstrom
+        max_grid_voxels: Maximum allowed number of voxels in output grid
+    
+    Returns:
+        CubeData object with common transformed grid
+    
+    Raises:
+        ValueError: If inputs are invalid or grid computation fails validation
+    """
     if len(cubes) != len(transforms) or not cubes:
         raise ValueError("cube와 정렬 변환의 개수가 일치해야 합니다")
+    
     corners: list[np.ndarray] = []
     spacing: list[list[float]] = []
+    
     for cube, (rotation, moving_center, reference_center) in zip(cubes, transforms, strict=True):
+        # Validate cube structure
         if not np.allclose(cube.axes, np.diag(np.diag(cube.axes)), atol=1e-10):
             raise ValueError("현재 공통 cube 격자는 축에 정렬된 직교 격자만 지원합니다")
-        spacing.append([abs(cube.axes[index, index]) for index in range(3)])
+        
+        if not np.all(np.isfinite(cube.origin)):
+            raise ValueError("Cube origin contains NaN/Inf values")
+        
+        if not np.all(np.isfinite(cube.axes)):
+            raise ValueError("Cube axes contain NaN/Inf values")
+        
+        if not np.all(np.isfinite(cube.values)):
+            raise ValueError("Cube values contain NaN/Inf values")
+        
+        # Validate transform
+        if not np.all(np.isfinite(rotation)):
+            raise ValueError("Rotation matrix contains NaN/Inf values")
+        
+        if not np.all(np.isfinite(moving_center)):
+            raise ValueError("Moving center contains NaN/Inf values")
+        
+        if not np.all(np.isfinite(reference_center)):
+            raise ValueError("Reference center contains NaN/Inf values")
+        
+        # Verify rotation is orthogonal
+        should_be_identity = rotation.T @ rotation
+        if not np.allclose(should_be_identity, np.eye(3), atol=1e-10):
+            raise ValueError(f"Rotation matrix is not orthogonal: deviation = {np.linalg.norm(should_be_identity - np.eye(3))}")
+        
+        det = float(np.linalg.det(rotation))
+        if not np.isfinite(det) or det < 0.9:  # Allow numerical tolerance
+            raise ValueError(f"Rotation matrix determinant is not +1: det = {det}")
+        
+        # Validate spacing
+        diag_spacing = [abs(cube.axes[i, i]) for i in range(3)]
+        if not all(np.isfinite(s) for s in diag_spacing):
+            raise ValueError("Grid spacing contains NaN/Inf values")
+        
+        if not all(s > 1e-12 for s in diag_spacing):
+            raise ValueError("Grid spacing must be positive")
+        
+        spacing.append(diag_spacing)
+        
+        # Compute transformed corners
         index_corners = np.asarray([
             [x, y, z]
             for x in (0, cube.shape[0] - 1)
             for y in (0, cube.shape[1] - 1)
             for z in (0, cube.shape[2] - 1)
         ], dtype=float)
+        
         world = cube.origin + index_corners @ cube.axes
-        corners.append((world - moving_center) @ rotation + reference_center)
+        transformed = (world - moving_center) @ rotation + reference_center
+        
+        if not np.all(np.isfinite(transformed)):
+            raise ValueError("Transformed corners contain NaN/Inf values")
+        
+        corners.append(transformed)
+    
+    # Compute bounds with padding
     all_corners = np.concatenate(corners)
     lower = all_corners.min(axis=0) - padding
     upper = all_corners.max(axis=0) + padding
+    
+    if not np.all(np.isfinite(lower)) or not np.all(np.isfinite(upper)):
+        raise ValueError("Grid bounds contain NaN/Inf values")
+    
+    extent = upper - lower
+    if not np.all(extent > 0):
+        raise ValueError(f"Grid extent must be positive: extent = {extent}")
+    
     voxel = np.min(np.asarray(spacing), axis=0)
-    shape = tuple((np.ceil((upper - lower) / voxel).astype(int) + 1).tolist())
+    
+    # Compute grid shape
+    shape_floats = np.ceil((extent) / voxel).astype(int) + 1
+    
+    # Validate shape
+    if not np.all(shape_floats >= 2):
+        raise ValueError(f"Grid shape must be at least 2 in each dimension: shape = {shape_floats}")
+    
+    total_voxels = int(np.prod(shape_floats))
+    if total_voxels > max_grid_voxels:
+        raise ValueError(f"Grid size {total_voxels} exceeds maximum {max_grid_voxels} voxels")
+    
+    shape = tuple(shape_floats.tolist())
     return CubeData(lower, np.diag(voxel), shape, np.zeros(shape, dtype=float))
 
 

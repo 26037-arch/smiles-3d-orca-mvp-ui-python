@@ -168,6 +168,7 @@ export function ReactionPathControls() {
   const failTrackingSurface = useProjectStore(s => s.failMoTrackingSurface)
   const trackingRequestRef = useRef<AbortController | undefined>(undefined)
   const trackingPrepareRequestRef = useRef<AbortController | undefined>(undefined)
+  const trackingPrepareKeyRef = useRef<string | undefined>(undefined)
   const upsertSurface = useProjectStore(s => s.upsertSurface)
   const removeSurface = useProjectStore(s => s.removeSurface)
   const reactionIsovalue = useProjectStore(s => s.surfaces.find(layer => layer.key === 'reaction-path-mo')?.isovalue ?? 0.03)
@@ -233,24 +234,40 @@ export function ReactionPathControls() {
       !playback
     ) return
 
+    // Early return if the same isovalue is already being prepared or has been prepared
+    const normalizedIsovalue = Math.round(reactionIsovalue * 1e12) / 1e12
+    const prepareKey = `${jobId}:${trackingId}:${normalizedIsovalue}`
+    
     if (
       trackingPreparedIsovalue !== undefined &&
-      Math.abs(trackingPreparedIsovalue - reactionIsovalue) < 1e-12 &&
+      Math.abs(trackingPreparedIsovalue - normalizedIsovalue) < 1e-12 &&
       Object.keys(trackingPreparedFrames).length > 0
     ) return
 
+    // If same preparation is already in flight, don't restart
+    if (trackingPrepareKeyRef.current === prepareKey && trackingStatus === 'preparing-surfaces') {
+      return
+    }
+
+    // If preparation has changed (different isovalue), abort previous and start new
+    if (trackingPrepareKeyRef.current !== prepareKey && trackingPrepareRequestRef.current) {
+      trackingPrepareRequestRef.current.abort()
+      trackingPrepareRequestRef.current = undefined
+    }
+
+    trackingPrepareKeyRef.current = prepareKey
+
     const timer = window.setTimeout(() => {
-      trackingPrepareRequestRef.current?.abort()
       const controller = new AbortController()
       trackingPrepareRequestRef.current = controller
 
-      beginSurfacePreparation(reactionIsovalue)
+      beginSurfacePreparation()
       const existing = useProjectStore.getState().surfaces.find(layer => layer.key === 'reaction-path-mo')
       if (existing) {
         upsertSurface({ ...existing, loading: true, error: undefined })
       }
 
-      api.prepareTrackingSurfaces(jobId, trackingId, reactionIsovalue, controller.signal)
+      api.prepareTrackingSurfaces(jobId, trackingId, normalizedIsovalue, controller.signal)
         .then(result => {
           if (trackingPrepareRequestRef.current !== controller || controller.signal.aborted) return
           completeSurfacePreparation(result)
@@ -279,14 +296,7 @@ export function ReactionPathControls() {
         trackingPrepareRequestRef.current = undefined
       }
     }
-  }, [trackingEnabled, trackingId, trackingResult, jobId, playback, reactionIsovalue, trackingPreparedIsovalue, trackingPreparedFrames, beginSurfacePreparation, completeSurfacePreparation, failTrackingSurface, upsertSurface])
-
-  useEffect(() => {
-    if (!jobId || !trackingId) return
-    return () => {
-      void api.releaseTrackingSurfaces(jobId, trackingId).catch(() => undefined)
-    }
-  }, [jobId, trackingId])
+  }, [trackingEnabled, trackingId, trackingResult, jobId, playback, reactionIsovalue, trackingStatus, beginSurfacePreparation, completeSurfacePreparation, failTrackingSurface, upsertSurface])
 
   useEffect(() => {
     if (calculationKind !== 'reaction-path') removeSurface('reaction-path-mo')

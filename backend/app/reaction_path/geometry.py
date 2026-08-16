@@ -30,64 +30,165 @@ def mass_weighted_kabsch(reference: np.ndarray, moving: np.ndarray, elements: li
 
 
 def _rotation_from_vectors(source: np.ndarray, target: np.ndarray) -> np.ndarray:
+    """
+    Compute rotation matrix that aligns source to target using Rodrigues' formula.
+    
+    Handles degenerate cases:
+    - Parallel vectors (no rotation needed)
+    - Antiparallel vectors (180° rotation)
+    - Degenerate zero vectors (identity)
+    """
     source = np.asarray(source, dtype=float)
     target = np.asarray(target, dtype=float)
+    
     source_norm = float(np.linalg.norm(source))
     target_norm = float(np.linalg.norm(target))
+    
+    # Check for degenerate input vectors
     if source_norm <= 1e-14 or target_norm <= 1e-14:
         return np.eye(3)
+    
     source_unit = source / source_norm
     target_unit = target / target_norm
-    dot = float(np.dot(source_unit, target_unit))
+    
+    dot = float(np.clip(np.dot(source_unit, target_unit), -1.0, 1.0))
+    
+    # Parallel case: source and target already aligned
     if dot > 1.0 - 1e-12:
         return np.eye(3)
+    
+    # Antiparallel case: 180° rotation needed
     if dot < -1.0 + 1e-12:
-        axis = np.cross(target_unit, source_unit)
-        if np.linalg.norm(axis) < 1e-12:
-            axis = np.cross([1.0, 0.0, 0.0], source_unit)
-        axis /= np.linalg.norm(axis)
-        skew = np.array([
+        # For 180° rotation, we need an axis perpendicular to source
+        # Choose the canonical basis axis least parallel to source
+        abs_source = np.abs(source_unit)
+        min_axis_idx = np.argmin(abs_source)
+        
+        # Create perpendicular axis
+        perp = np.zeros(3)
+        perp[min_axis_idx] = 1.0
+        axis = np.cross(perp, source_unit)
+        
+        axis_norm = float(np.linalg.norm(axis))
+        if axis_norm < 1e-12:
+            # Extremely unlikely, but handle gracefully
+            return np.eye(3)
+        
+        axis = axis / axis_norm
+        
+        # Skew-symmetric matrix of the axis
+        K = np.array([
             [0.0, -axis[2], axis[1]],
             [axis[2], 0.0, -axis[0]],
             [-axis[1], axis[0], 0.0],
         ], dtype=float)
-        return np.eye(3) + skew + (skew @ skew)
-    axis = np.cross(target_unit, source_unit)
-    if np.linalg.norm(axis) < 1e-12:
+        
+        # For 180°: R = I + 2K²
+        return np.eye(3) + 2.0 * (K @ K)
+    
+    # General case: compute rotation via Rodrigues' formula
+    # R = I + sin(θ)K + (1-cos(θ))K²
+    # axis should be normalized cross product: source × target
+    axis = np.cross(source_unit, target_unit)
+    axis_norm = float(np.linalg.norm(axis))
+    
+    if axis_norm < 1e-12:
+        # Source and target are parallel (already handled above, but be safe)
         return np.eye(3)
-    axis /= np.linalg.norm(axis)
-    angle = math.acos(np.clip(dot, -1.0, 1.0))
-    skew = np.array([
+    
+    axis = axis / axis_norm
+    angle = math.acos(dot)
+    sin_angle = math.sin(angle)
+    cos_angle = math.cos(angle)
+    
+    # Skew-symmetric matrix of the normalized axis
+    K = np.array([
         [0.0, -axis[2], axis[1]],
         [axis[2], 0.0, -axis[0]],
         [-axis[1], axis[0], 0.0],
     ], dtype=float)
-    return np.eye(3) + skew + (skew @ skew) * ((1.0 - math.cos(angle)) / max(np.linalg.norm(axis) ** 2, 1e-12))
+    
+    # Rodrigues' formula
+    R = np.eye(3) + sin_angle * K + (1.0 - cos_angle) * (K @ K)
+    
+    # Validate result
+    if not np.all(np.isfinite(R)):
+        raise ValueError("Rotation matrix computation resulted in NaN/Inf values")
+    
+    # Verify orthogonality
+    should_be_identity = R.T @ R
+    if not np.allclose(should_be_identity, np.eye(3), atol=1e-10):
+        raise ValueError(f"Rotation matrix is not orthogonal: R.T @ R deviation = {np.linalg.norm(should_be_identity - np.eye(3))}")
+    
+    # Verify proper rotation (det = +1)
+    det = float(np.linalg.det(R))
+    if not np.isfinite(det) or det < 0.9:  # Allow some numerical tolerance
+        raise ValueError(f"Rotation matrix determinant is not +1: det(R) = {det}")
+    
+    return R
 
 
 def mass_weighted_kabsch_transform(
     reference: np.ndarray, moving: np.ndarray, elements: list[str]
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return rotation, moving centroid and reference centroid for field alignment."""
+    """
+    Compute rotation matrix, moving centroid, and reference centroid for field alignment.
+    
+    Returns:
+        (rotation, moving_centroid, reference_centroid)
+    
+    Raises ValueError if inputs are invalid or rotation computation fails.
+    """
     if reference.shape != moving.shape or reference.ndim != 2 or reference.shape[1] != 3:
         raise ValueError("Kabsch 정렬 좌표의 shape가 일치하지 않습니다")
+    
     weights = np.asarray([ATOMIC_MASSES.get(element, 1.0) for element in elements], dtype=float)
     weights /= weights.sum()
+    
+    # Compute mass-weighted centroids
     ref_center = np.sum(reference * weights[:, None], axis=0)
     mov_center = np.sum(moving * weights[:, None], axis=0)
+    
+    # Center the coordinates
     ref0 = reference - ref_center
     mov0 = moving - mov_center
+    
+    # Compute SVD-based rotation
     covariance = (mov0 * weights[:, None]).T @ ref0
-    left, _, right_t = np.linalg.svd(covariance)
+    left, s, right_t = np.linalg.svd(covariance)
+    
+    # Ensure proper rotation (det = +1, not -1 for reflection)
     correction = np.eye(3)
     correction[-1, -1] = np.sign(np.linalg.det(left @ right_t))
     rotation = left @ correction @ right_t
+    
+    # Handle degenerate case (rank < 2, e.g., linear molecules)
     if np.linalg.matrix_rank(covariance) < 2:
-        moving_axis = mov0[np.argmax(np.linalg.norm(mov0, axis=1))] - mov_center + mov_center * 0.0
-        reference_axis = ref0[np.argmax(np.linalg.norm(ref0, axis=1))] - ref_center + ref_center * 0.0
-        if np.linalg.norm(moving_axis) < 1e-12 or np.linalg.norm(reference_axis) < 1e-12:
-            return rotation, mov_center, ref_center
-        rotation = _rotation_from_vectors(moving_axis, reference_axis)
+        # Find the atom with maximum displacement
+        moving_norms = np.linalg.norm(mov0, axis=1)
+        reference_norms = np.linalg.norm(ref0, axis=1)
+        
+        moving_max_idx = np.argmax(moving_norms)
+        reference_max_idx = np.argmax(reference_norms)
+        
+        moving_axis = mov0[moving_max_idx]  # Already centered
+        reference_axis = ref0[reference_max_idx]  # Already centered
+        
+        if np.linalg.norm(moving_axis) > 1e-12 and np.linalg.norm(reference_axis) > 1e-12:
+            rotation = _rotation_from_vectors(moving_axis, reference_axis)
+    
+    # Validate rotation matrix
+    if not np.all(np.isfinite(rotation)):
+        raise ValueError("Kabsch rotation matrix contains NaN or Inf values")
+    
+    should_be_identity = rotation.T @ rotation
+    if not np.allclose(should_be_identity, np.eye(3), atol=1e-10):
+        raise ValueError(f"Kabsch rotation is not orthogonal: error = {np.linalg.norm(should_be_identity - np.eye(3))}")
+    
+    det = float(np.linalg.det(rotation))
+    if not np.isfinite(det) or det < 0.9:
+        raise ValueError(f"Kabsch rotation determinant is not +1: det(R) = {det}")
+    
     return rotation, mov_center, ref_center
 
 

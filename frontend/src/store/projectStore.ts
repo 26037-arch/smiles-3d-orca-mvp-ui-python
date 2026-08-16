@@ -121,7 +121,7 @@ export interface ProjectStore {
   setReactionPlaying(playing: boolean): void
   beginMoTracking(): void
   completeMoTracking(result: OrbitalTrackingResult): void
-  beginMoTrackingSurfacePreparation(isovalue: number): void
+  beginMoTrackingSurfacePreparation(): void
   completeMoTrackingSurfacePreparation(result: TrackingSurfacePreparationResult): void
   retryMoTrackingPreparation(): void
   failMoTrackingSetup(message: string): void
@@ -438,12 +438,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     trackingPreparedFrames: {},
     trackingPreparedIsovalue: undefined,
   }),
-  beginMoTrackingSurfacePreparation: trackingPreparedIsovalue => set({
+  beginMoTrackingSurfacePreparation: () => set({
     trackingLoading: true,
     trackingSurfaceError: undefined,
     trackingStatus: 'preparing-surfaces',
-    trackingPreparedFrames: {},
-    trackingPreparedIsovalue,
   }),
   completeMoTrackingSurfacePreparation: result => set(state => ({
     trackingLoading: false,
@@ -458,8 +456,6 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       trackingLoading: true,
       trackingSurfaceError: undefined,
       trackingStatus: 'preparing-surfaces' as TrackingStatus,
-      trackingPreparedFrames: {},
-      trackingPreparedIsovalue: undefined,
     }
   }),
   failMoTrackingSetup: trackingError => set({
