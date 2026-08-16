@@ -236,6 +236,9 @@ class CalculatedImage(StrictModel):
     index: int = Field(ge=0)
     atoms: list[CalculatedAtom]
     energy_hartree: float | None = Field(default=None, alias="energyHartree")
+    electronic_structure_energy_hartree: float | None = Field(
+        default=None, alias="electronicStructureEnergyHartree"
+    )
     energy_change_hartree: float | None = Field(default=None, alias="energyChangeHartree")
     relative_energy_kj_mol: float | None = Field(default=None, alias="relativeEnergyKjMol")
     reaction_coordinate: float | None = Field(default=None, alias="reactionCoordinate")
@@ -298,6 +301,15 @@ class ReactionPathSourceMetadata(StrictModel):
     sha256: str = Field(min_length=64, max_length=64)
 
 
+class OrbitalPostprocessMetadata(StrictModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True, frozen=True)
+    strategy: Literal["sequential-single-point"] = "sequential-single-point"
+    method: str
+    first_guess: Literal["PAtom"] = Field(alias="firstGuess")
+    subsequent_guess: Literal["MOREAD"] = Field(alias="subsequentGuess")
+    source: Literal["previous-geometry-gbw"] = "previous-geometry-gbw"
+
+
 class ReactionPathResult(StrictModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True, frozen=True)
     schema_version: Literal[1, 2] = Field(alias="schemaVersion")
@@ -317,6 +329,10 @@ class ReactionPathResult(StrictModel):
         default=False, alias="isPhysicalTimeTrajectory"
     )
     initial_guess: Literal["PAtom"] | None = Field(default=None, alias="initialGuess")
+    optimization_method: str | None = Field(default=None, alias="optimizationMethod")
+    orbital_postprocess: OrbitalPostprocessMetadata | None = Field(
+        default=None, alias="orbitalPostprocess"
+    )
     energy_unit: Literal["hartree"] = Field(default="hartree", alias="energyUnit")
     relative_energy_unit: Literal["kJ/mol"] = Field(
         default="kJ/mol", alias="relativeEnergyUnit"

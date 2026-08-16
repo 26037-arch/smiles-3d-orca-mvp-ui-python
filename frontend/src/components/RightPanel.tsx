@@ -132,11 +132,13 @@ function SurfacesPanel() {
   )
   const reactionHasWavefunctions = Boolean(reactionImage?.wavefunctionRef)
   const trackingEnabled = useProjectStore(s => s.trackingEnabled)
-  const trackingLoading = useProjectStore(s => s.trackingLoading)
+  const trackingStatus = useProjectStore(s => s.trackingStatus)
   const trackingSource = useProjectStore(s => s.trackingSourceOrbitalId)
   const trackingError = useProjectStore(s => s.trackingError)
   const trackingSurfaceError = useProjectStore(s => s.trackingSurfaceError)
+  const trackingResult = useProjectStore(s => s.trackingResult)
   const beginTracking = useProjectStore(s => s.beginMoTracking)
+  const retryTracking = useProjectStore(s => s.retryMoTrackingPreparation)
   const stopTracking = useProjectStore(s => s.stopMoTracking)
   const [extraOrbitalId, setExtraOrbitalId] = useState('')
   const frontier = useMemo(() => frontierOrbitals(availableOrbitals, result?.homo_internal_id), [availableOrbitals, result?.homo_internal_id])
@@ -175,7 +177,29 @@ function SurfacesPanel() {
       <select aria-label="MO 선택" disabled={reactionMoDisabled} value={extraOrbitalId} onChange={event => { setExtraOrbitalId(event.target.value); setSelected(event.target.value || undefined) }}><option value="">MO 선택</option>{availableOrbitals.map(orbital => <option key={orbital.internal_id} value={orbital.internal_id}>{orbitalOptionLabel(orbital)}</option>)}</select>
       {extraOrbital && <div className="mo-selection"><span>선택된 MO <b>{extraOrbital.spin === 'alpha' ? 'α ' : extraOrbital.spin === 'beta' ? 'β ' : ''}MO {extraOrbital.display_number}{extraOrbital.label ? ` · ${extraOrbital.label}` : ''}</b></span><span>에너지 <b>{(extraOrbital.energy_hartree * 27.211386245988).toFixed(2)} eV</b></span><span>점유수 <b>{extraOrbital.occupancy.toFixed(1)}</b></span><span>Spin <b>{extraOrbital.spin}</b></span></div>}
       <button className="wide" disabled={!extraOrbital || reactionMoDisabled} onClick={() => addLayer(extraOrbital)}><Plus /> 현재 geometry 표면 표시</button>
-      {calculationKind === 'reaction-path' && <button className="wide" disabled={!trackingEnabled && (!selected || reactionMoDisabled)} onClick={trackingEnabled ? stopTracking : beginTracking}>{trackingLoading ? 'MO Tracking 준비 중…' : trackingEnabled ? 'MO Tracking 해제' : trackingError || trackingSurfaceError ? 'MO Tracking 다시 시도' : 'MO Tracking 시작'}</button>}
+      {calculationKind === 'reaction-path' && <button
+        className="wide"
+        disabled={!trackingEnabled && (!selected || reactionMoDisabled)}
+        onClick={
+          trackingEnabled && trackingStatus === 'error' && trackingResult
+            ? retryTracking
+            : trackingEnabled
+              ? stopTracking
+              : beginTracking
+        }
+      >
+        {trackingStatus === 'matching'
+          ? 'MO 대응 관계 계산 중… · 취소'
+          : trackingStatus === 'preparing-surfaces'
+            ? 'MO 표면 준비 중… · 취소'
+            : trackingEnabled && trackingStatus === 'error' && trackingResult
+              ? 'MO 표면 준비 다시 시도'
+              : trackingEnabled
+                ? 'MO Tracking 해제'
+                : trackingError || trackingSurfaceError
+                  ? 'MO Tracking 다시 시도'
+                  : 'MO Tracking 시작'}
+      </button>}
       {trackingEnabled && <p className="help">추적 기준: {trackingSource}</p>}
       {(trackingError ?? trackingSurfaceError) && <p className="inline-error">{trackingError ?? trackingSurfaceError}</p>}
     </div>

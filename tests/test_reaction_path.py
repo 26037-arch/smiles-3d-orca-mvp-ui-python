@@ -12,6 +12,7 @@ from backend.app.reaction_path.geometry import (
     create_display_frames,
     image_coordinates,
     mass_weighted_kabsch,
+    mass_weighted_kabsch_transform,
 )
 from backend.app.reaction_path.orbitals import (
     GridOrbitalOverlapProvider,
@@ -134,6 +135,35 @@ def test_common_grid_signed_overlap_and_phase_alignment():
     assert np.array_equal(align_phase(right.values, overlap), left.values)
     assert np.array_equal(right.values, -left.values)
     assert np.allclose(interpolate_scalar_fields(left.values, align_phase(right.values, overlap), 0.5), left.values)
+
+
+def test_collinear_kabsch_uses_deterministic_minimum_twist():
+    reference = np.asarray([
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [2.0, 0.0, 0.0],
+        [3.0, 0.0, 0.0],
+    ], dtype=float)
+    moving = np.asarray([
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 2.0, 0.0],
+        [0.0, 3.0, 0.0],
+    ], dtype=float)
+    rotation, _, _ = mass_weighted_kabsch_transform(reference, moving, ["C"] * 4)
+    expected = np.asarray([
+        [0.0, -1.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ], dtype=float)
+    assert np.allclose(rotation, expected, atol=1e-8)
+
+
+def test_interpolated_orbital_preserves_l2_scale():
+    left = np.linspace(-1.0, 1.0, 12, dtype=float)
+    right = -left.copy()
+    result = interpolate_scalar_fields(left, right, 0.5)
+    assert np.linalg.norm(result) == pytest.approx(np.linalg.norm(left), rel=1e-6, abs=1e-8)
 
 
 def test_overlap_threshold_assignment_and_terminal_tracking():

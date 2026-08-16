@@ -29,6 +29,42 @@ def mass_weighted_kabsch(reference: np.ndarray, moving: np.ndarray, elements: li
     return aligned
 
 
+def _rotation_from_vectors(source: np.ndarray, target: np.ndarray) -> np.ndarray:
+    source = np.asarray(source, dtype=float)
+    target = np.asarray(target, dtype=float)
+    source_norm = float(np.linalg.norm(source))
+    target_norm = float(np.linalg.norm(target))
+    if source_norm <= 1e-14 or target_norm <= 1e-14:
+        return np.eye(3)
+    source_unit = source / source_norm
+    target_unit = target / target_norm
+    dot = float(np.dot(source_unit, target_unit))
+    if dot > 1.0 - 1e-12:
+        return np.eye(3)
+    if dot < -1.0 + 1e-12:
+        axis = np.cross(target_unit, source_unit)
+        if np.linalg.norm(axis) < 1e-12:
+            axis = np.cross([1.0, 0.0, 0.0], source_unit)
+        axis /= np.linalg.norm(axis)
+        skew = np.array([
+            [0.0, -axis[2], axis[1]],
+            [axis[2], 0.0, -axis[0]],
+            [-axis[1], axis[0], 0.0],
+        ], dtype=float)
+        return np.eye(3) + skew + (skew @ skew)
+    axis = np.cross(target_unit, source_unit)
+    if np.linalg.norm(axis) < 1e-12:
+        return np.eye(3)
+    axis /= np.linalg.norm(axis)
+    angle = math.acos(np.clip(dot, -1.0, 1.0))
+    skew = np.array([
+        [0.0, -axis[2], axis[1]],
+        [axis[2], 0.0, -axis[0]],
+        [-axis[1], axis[0], 0.0],
+    ], dtype=float)
+    return np.eye(3) + skew + (skew @ skew) * ((1.0 - math.cos(angle)) / max(np.linalg.norm(axis) ** 2, 1e-12))
+
+
 def mass_weighted_kabsch_transform(
     reference: np.ndarray, moving: np.ndarray, elements: list[str]
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -46,6 +82,12 @@ def mass_weighted_kabsch_transform(
     correction = np.eye(3)
     correction[-1, -1] = np.sign(np.linalg.det(left @ right_t))
     rotation = left @ correction @ right_t
+    if np.linalg.matrix_rank(covariance) < 2:
+        moving_axis = mov0[np.argmax(np.linalg.norm(mov0, axis=1))] - mov_center + mov_center * 0.0
+        reference_axis = ref0[np.argmax(np.linalg.norm(ref0, axis=1))] - ref_center + ref_center * 0.0
+        if np.linalg.norm(moving_axis) < 1e-12 or np.linalg.norm(reference_axis) < 1e-12:
+            return rotation, mov_center, ref_center
+        rotation = _rotation_from_vectors(moving_axis, reference_axis)
     return rotation, mov_center, ref_center
 
 

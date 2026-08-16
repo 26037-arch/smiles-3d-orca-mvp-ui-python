@@ -87,6 +87,11 @@ class TrackingFrameSurfaceRequest(BaseModel):
     isovalue: float = 0.03
 
 
+class TrackingSurfacePrepareRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    isovalue: float = 0.03
+
+
 @router.put("/settings/orca-path")
 def update_orca_path(body: OrcaPathUpdate, request: Request) -> dict[str, object]:
     if body.path:
@@ -209,6 +214,39 @@ def create_tracking_frame_surface(
         raise error(422, exc.code, exc.detail) from exc
     except (OSError, ValueError) as exc:
         raise error(422, "TRACKING_SURFACE_GENERATION_FAILED", str(exc)) from exc
+
+
+@router.post("/jobs/{job_id}/reaction-path/tracking/{tracking_id}/prepare")
+def prepare_tracking_surfaces(
+    job_id: UUID,
+    tracking_id: str,
+    body: TrackingSurfacePrepareRequest,
+    request: Request,
+):
+    from ..reaction_path import ReactionPathError
+
+    try:
+        if not 0 < body.isovalue < 100:
+            raise ReactionPathError("INVALID_ISOVALUE", "isovalue must be positive")
+        return reaction_paths(request).prepare_tracking_surfaces(
+            job_id, tracking_id, body.isovalue
+        )
+    except ReactionPathError as exc:
+        raise error(422, exc.code, exc.detail) from exc
+    except (OSError, ValueError) as exc:
+        raise error(422, "TRACKING_SURFACE_PREPARATION_FAILED", str(exc)) from exc
+
+
+@router.post("/jobs/{job_id}/reaction-path/tracking/{tracking_id}/release")
+def release_tracking_surfaces(
+    job_id: UUID,
+    tracking_id: str,
+    request: Request,
+):
+    try:
+        return reaction_paths(request).release_tracking_surfaces(job_id, tracking_id)
+    except (OSError, ValueError) as exc:
+        raise error(422, "TRACKING_SURFACE_RELEASE_FAILED", str(exc)) from exc
 
 
 @router.get("/jobs/{job_id}/reaction-path/surfaces/{surface_id}/mesh")

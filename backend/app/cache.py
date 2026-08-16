@@ -76,7 +76,20 @@ class DerivedCacheManager:
     def __init__(self, settings: LocalSettings):
         self.settings = settings
         self._accessed: dict[Path, int] = {}
+        self._pinned: set[Path] = set()
         self._lock = threading.RLock()
+
+    def pin(self, path: Path) -> Path:
+        resolved = path.resolve()
+        with self._lock:
+            self._pinned.add(resolved)
+        return resolved
+
+    def unpin(self, path: Path) -> Path:
+        resolved = path.resolve()
+        with self._lock:
+            self._pinned.discard(resolved)
+        return resolved
 
     def directory(self, job_dir: Path, category: str) -> Path:
         directory = job_dir / "cache" / self._CATEGORY_DIR[category]
@@ -93,6 +106,7 @@ class DerivedCacheManager:
         job_dir = job_dir.resolve()
         protected_paths = {path.resolve() for path in protected}
         with self._lock:
+            protected_paths |= self._pinned
             entries = self._entries(job_dir)
             removed: list[Path] = []
 

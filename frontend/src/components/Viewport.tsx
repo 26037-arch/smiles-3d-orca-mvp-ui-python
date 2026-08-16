@@ -158,12 +158,16 @@ export function ReactionPathControls() {
   const trackingError = useProjectStore(s => s.trackingError)
   const trackingSurfaceError = useProjectStore(s => s.trackingSurfaceError)
   const trackingResult = useProjectStore(s => s.trackingResult)
+  const trackingStatus = useProjectStore(s => s.trackingStatus)
+  const trackingPreparedFrames = useProjectStore(s => s.trackingPreparedFrames)
+  const trackingPreparedIsovalue = useProjectStore(s => s.trackingPreparedIsovalue)
   const completeTracking = useProjectStore(s => s.completeMoTracking)
+  const beginSurfacePreparation = useProjectStore(s => s.beginMoTrackingSurfacePreparation)
+  const completeSurfacePreparation = useProjectStore(s => s.completeMoTrackingSurfacePreparation)
   const failTrackingSetup = useProjectStore(s => s.failMoTrackingSetup)
   const failTrackingSurface = useProjectStore(s => s.failMoTrackingSurface)
-  const [frameSurfaceLoading, setFrameSurfaceLoading] = useState(false)
   const trackingRequestRef = useRef<AbortController | undefined>(undefined)
-  const trackingSurfaceRequestRef = useRef<AbortController | undefined>(undefined)
+  const trackingPrepareRequestRef = useRef<AbortController | undefined>(undefined)
   const upsertSurface = useProjectStore(s => s.upsertSurface)
   const removeSurface = useProjectStore(s => s.removeSurface)
   const reactionIsovalue = useProjectStore(s => s.surfaces.find(layer => layer.key === 'reaction-path-mo')?.isovalue ?? 0.03)
@@ -221,63 +225,124 @@ export function ReactionPathControls() {
   }, [trackingEnabled, trackingId, trackingSourceOrbital, trackingSourceGeometry, jobId, playback, completeTracking, failTrackingSetup])
 
   useEffect(() => {
+    if (
+      !trackingEnabled ||
+      !trackingId ||
+      !trackingResult ||
+      !jobId ||
+      !playback
+    ) return
+
+    if (
+      trackingPreparedIsovalue !== undefined &&
+      Math.abs(trackingPreparedIsovalue - reactionIsovalue) < 1e-12 &&
+      Object.keys(trackingPreparedFrames).length > 0
+    ) return
+
+    const timer = window.setTimeout(() => {
+      trackingPrepareRequestRef.current?.abort()
+      const controller = new AbortController()
+      trackingPrepareRequestRef.current = controller
+
+      beginSurfacePreparation(reactionIsovalue)
+      const existing = useProjectStore.getState().surfaces.find(layer => layer.key === 'reaction-path-mo')
+      if (existing) {
+        upsertSurface({ ...existing, loading: true, error: undefined })
+      }
+
+      api.prepareTrackingSurfaces(jobId, trackingId, reactionIsovalue, controller.signal)
+        .then(result => {
+          if (trackingPrepareRequestRef.current !== controller || controller.signal.aborted) return
+          completeSurfacePreparation(result)
+        })
+        .catch(error => {
+          if (trackingPrepareRequestRef.current !== controller || controller.signal.aborted) return
+          const message = (error as Error).message
+          failTrackingSurface(message)
+          const current = useProjectStore.getState().surfaces.find(layer => layer.key === 'reaction-path-mo')
+          if (current) {
+            upsertSurface({ ...current, loading: false, error: message })
+          }
+        })
+        .finally(() => {
+          if (trackingPrepareRequestRef.current === controller) {
+            trackingPrepareRequestRef.current = undefined
+          }
+        })
+    }, 250)
+
+    return () => {
+      window.clearTimeout(timer)
+      const current = trackingPrepareRequestRef.current
+      if (current) {
+        current.abort()
+        trackingPrepareRequestRef.current = undefined
+      }
+    }
+  }, [trackingEnabled, trackingId, trackingResult, jobId, playback, reactionIsovalue, trackingPreparedIsovalue, trackingPreparedFrames, beginSurfacePreparation, completeSurfacePreparation, failTrackingSurface, upsertSurface])
+
+  useEffect(() => {
+    if (!jobId || !trackingId) return
+    return () => {
+      void api.releaseTrackingSurfaces(jobId, trackingId).catch(() => undefined)
+    }
+  }, [jobId, trackingId])
+
+  useEffect(() => {
     if (calculationKind !== 'reaction-path') removeSurface('reaction-path-mo')
     return () => removeSurface('reaction-path-mo')
   }, [calculationKind, removeSurface])
 
   useEffect(() => {
     const frame = playback?.displayFrames[frameIndex]
-    const iterations = frame ? playback?.path.images[frame.leftImageIndex]?.scfIterations?.length ?? 0 : 0
-
-    if (!trackingEnabled || !trackingId || !trackingSourceOrbital || !jobId || !playback || scfIterationIndex < iterations) {
+    if (!trackingEnabled || !trackingId || !trackingSourceOrbital || !playback || !trackingResult) {
       removeSurface('reaction-path-mo')
-      setFrameSurfaceLoading(false)
-      trackingSurfaceRequestRef.current = undefined
       return
     }
-    if (!frame || !trackingResult) {
-      removeSurface('reaction-path-mo')
-      setFrameSurfaceLoading(false)
-      trackingSurfaceRequestRef.current = undefined
-      return
-    }
+    if (!frame) return
 
     const leftGeometry = frame.leftImageIndex
     const rightGeometry = frame.rightImageIndex
     const inCoverage = trackedGeometry.has(leftGeometry) && trackedGeometry.has(rightGeometry)
     if (!inCoverage) {
-      removeSurface('reaction-path-mo')
-      setFrameSurfaceLoading(false)
-      trackingSurfaceRequestRef.current = undefined
+      const current = useProjectStore.getState().surfaces.find(layer => layer.key === 'reaction-path-mo')
+      if (current) {
+        upsertSurface({ ...current, name: '추적 MO · tracking 범위 밖', loading: false, error: undefined, meshUrls: {} })
+      }
       return
     }
 
-    trackingSurfaceRequestRef.current = new AbortController()
-    const controller = trackingSurfaceRequestRef.current
-    setFrameSurfaceLoading(true)
-    api.trackingFrameSurface(jobId, trackingId, frameIndex, reactionIsovalue, controller.signal).then(response => {
-      if (trackingSurfaceRequestRef.current !== controller || controller.signal.aborted) return
-      const calculated = playback.displayFrames[frameIndex].isCalculated
-      upsertSurface({
-        key: 'reaction-path-mo', name: calculated ? '추적 MO · 계산 geometry' : '추적 MO · 보간 표시', field: 'mo',
-        orbitalInternalId: trackingSourceOrbital, spin: trackingSourceOrbital.startsWith('alpha:') ? 'alpha' : trackingSourceOrbital.startsWith('beta:') ? 'beta' : 'restricted',
-        visible: true, opacity: .55, isovalue: reactionIsovalue, positiveColor: '#45b8ff', negativeColor: '#ff6a8a', meshUrls: response.meshUrls, cacheHit: response.cacheHit, reactionFrame: true,
-      })
-    }).catch(error => {
-      if (trackingSurfaceRequestRef.current !== controller || controller.signal.aborted) return
-      const message = (error as Error).message
-      if (message.includes('TRACKING_NOT_AVAILABLE_FOR_FRAME')) {
-        removeSurface('reaction-path-mo')
-        return
-      }
-      failTrackingSurface(message)
-    }).finally(() => {
-      if (trackingSurfaceRequestRef.current === controller) {
-        trackingSurfaceRequestRef.current = undefined
-        setFrameSurfaceLoading(false)
-      }
+    if (!['ready', 'partial'].includes(trackingStatus)) return
+    const prepared = trackingPreparedFrames[frameIndex]
+    if (!prepared) return
+
+    const leftStep = trackingResult.steps.find(step => step.geometry === leftGeometry)
+    const rightStep = trackingResult.steps.find(step => step.geometry === rightGeometry)
+    const actualOrbital = leftStep?.orbital ?? trackingSourceOrbital
+    const spin = actualOrbital.startsWith('alpha:') ? 'alpha' : actualOrbital.startsWith('beta:') ? 'beta' : 'restricted'
+    const calculated = frame.isCalculated
+    const orbitalLabel = leftStep && rightStep && leftStep.orbital !== rightStep.orbital
+      ? `${leftStep.orbital} → ${rightStep.orbital}`
+      : actualOrbital
+
+    upsertSurface({
+      key: 'reaction-path-mo',
+      name: calculated ? `추적 MO · 계산 geometry · ${orbitalLabel}` : `추적 MO · 보간 표시 · ${orbitalLabel}`,
+      field: 'mo',
+      orbitalInternalId: actualOrbital,
+      spin,
+      visible: true,
+      opacity: .55,
+      isovalue: reactionIsovalue,
+      positiveColor: '#45b8ff',
+      negativeColor: '#ff6a8a',
+      meshUrls: prepared.meshUrls,
+      cacheHit: prepared.cacheHit,
+      reactionFrame: true,
+      loading: false,
+      error: undefined,
     })
-  }, [trackingEnabled, trackingId, trackingSourceOrbital, jobId, playback, frameIndex, scfIterationIndex, reactionIsovalue, upsertSurface, removeSurface, failTrackingSurface, trackedGeometry, trackingResult])
+  }, [trackingEnabled, trackingId, trackingSourceOrbital, playback, frameIndex, reactionIsovalue, upsertSurface, removeSurface, trackedGeometry, trackingResult, trackingStatus, trackingPreparedFrames])
 
   useEffect(() => {
     const frame = playback?.displayFrames[frameIndex]
@@ -315,6 +380,14 @@ export function ReactionPathControls() {
   const hasWavefunctions = Boolean(playback.path.images[0]?.wavefunctionRef || Object.keys(playback.path.images[0]?.orbitalRefs ?? {}).length)
   const geometryEnergies = playback.path.images.map(item => item.relativeEnergyKjMol).filter((value): value is number => value != null)
   const scfEnergies = scfIterations.slice(0, scfIterationIndex).map(item => item.energyHartree).filter((value): value is number => value != null)
+  const currentTransition = trackingResult?.transitions.find(
+    transition => transition.leftImageIndex === frame.leftImageIndex && transition.rightImageIndex === frame.rightImageIndex,
+  )
+  const acceptedOverlaps = (trackingResult?.transitions ?? [])
+    .map(transition => transition.match.absoluteOverlap)
+    .filter((value): value is number => value != null)
+  const minimumTrackingOverlap = acceptedOverlaps.length ? Math.min(...acceptedOverlaps) : undefined
+  const trackingBusy = trackingStatus === 'matching' || trackingStatus === 'preparing-surfaces'
   const points = (values: number[]) => {
     if (!values.length) return ''
     const minimum = Math.min(...values); const span = Math.max(1e-12, Math.max(...values) - minimum)
@@ -327,11 +400,16 @@ export function ReactionPathControls() {
     <div className="reaction-energy">{frame.isCalculated && frame.relativeEnergyKjMol != null ? `${frame.relativeEnergyKjMol.toFixed(2)} kJ/mol` : '표시 보간 · 에너지 없음'}{currentScf?.energyHartree != null && ` · SCF ${currentScf.energyHartree.toFixed(8)} Eh`}</div>
     <div className="reaction-graphs"><label>Geometry ΔE<svg viewBox="0 0 140 30"><polyline points={points(geometryEnergies)} /></svg></label><label>현재 geometry SCF<svg viewBox="0 0 140 30"><polyline points={points(scfEnergies)} /></svg></label></div>
     {!hasWavefunctions && <div className="reaction-mo-warning">이 최적화 경로에는 파동함수 결과가 없습니다. 분자 구조 경로만 재생할 수 있습니다.</div>}
-    {trackingEnabled && (trackingLoading || frameSurfaceLoading) && <div className="reaction-mo-warning">명시적으로 요청한 MO Tracking을 준비하는 중…</div>}
+    {trackingEnabled && trackingStatus === 'matching' && <div className="reaction-mo-warning">MO 대응 관계를 계산하는 중…</div>}
+    {trackingEnabled && trackingStatus === 'preparing-surfaces' && <div className="reaction-mo-warning">MO Tracking 표면을 미리 준비하는 중…</div>}
     {(trackingError ?? trackingSurfaceError) && !trackingLoading && <div className="reaction-mo-warning">{trackingError ?? trackingSurfaceError} · 원자 경로는 계속 재생됩니다.</div>}
-    {trackingEnabled && !trackingLoading && trackingActive === false && trackingResult && trackingResult.steps.length > 0 && !trackingError && !trackingSurfaceError && <div className="reaction-mo-warning">일부 geometry에서만 MO 추적이 유지됩니다. 이후 프레임에서는 표면이 비활성화됩니다.</div>}
-    {trackingEnabled && !trackingLoading && trackingActive === false && !trackingResult && !trackingError && !trackingSurfaceError && <div className="reaction-mo-warning">대응 오비탈 없음 — 추적 종료 · 원자 경로는 계속 재생됩니다.</div>}
-    <p>geometry 사이 보간은 표시 전용이며 에너지나 실제 시간으로 해석하지 않습니다.</p>
+    {trackingEnabled && trackingStatus === 'partial' && trackingResult?.steps.length === 1 && !trackingError && !trackingSurfaceError && <div className="reaction-mo-warning">선택한 MO는 시작 geometry 밖으로 안정적으로 추적되지 않았습니다.</div>}
+    {trackingEnabled && trackingStatus === 'partial' && (trackingResult?.steps.length ?? 0) > 1 && !trackingError && !trackingSurfaceError && <div className="reaction-mo-warning">일부 geometry에서만 MO 추적이 유지됩니다. tracking 범위를 벗어나면 MO 표면을 표시하지 않습니다.</div>}
+    {trackingResult && !trackingBusy && <div className="reaction-frame-info"><strong>MO Tracking {trackingResult.steps.length}/{playback.path.images.length} geometry</strong><span>{minimumTrackingOverlap !== undefined ? `최소 |overlap| ${minimumTrackingOverlap.toFixed(3)}` : 'overlap 전이 없음'}</span></div>}
+    {currentTransition && <div className="reaction-frame-info"><strong>{currentTransition.match.leftOrbitalId}{' → '}{currentTransition.match.rightOrbitalId ?? 'lost'}</strong><span>{currentTransition.match.absoluteOverlap != null ? `|S|=${currentTransition.match.absoluteOverlap.toFixed(3)} · ${currentTransition.match.status}` : currentTransition.match.status}</span></div>}
+    {playback.path.orbitalPostprocess && <p>MO: {playback.path.orbitalPostprocess.method} geometry별 SP · 첫 지점 PAtom · 이후 지점 MOREAD</p>}
+    <p>SCF 그래프는 geometry 최적화 수렴 이력입니다. 표시되는 MO는 각 geometry에서 별도로 계산한 최종 SP wavefunction입니다.</p>
+    <p>geometry 사이 MO는 시각화용 field 보간이며 실제 중간 전자상태나 물리적 시간발전으로 해석하지 않습니다.</p>
   </div>
 }
 

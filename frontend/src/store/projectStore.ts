@@ -3,7 +3,23 @@ import { inferBonds } from '../chem/bonds'
 import { changeAngle, changeDistance, threeAtomPlane } from '../chem/geometry'
 import { AO_REFERENCE_OPACITY } from '../chem/aoComposition'
 import { projectForReactionFrame } from '../chem/reactionPath'
-import type { Atom, Bond, CalculationKind, CalculationResult, MoleculeProject, OrbitalTrackingResult, ReactionPathPlayback, ReactionPathStatus, SketchPlane, SurfaceLayer, Tool, Vec3 } from '../types'
+import type {
+  Atom,
+  Bond,
+  CalculationKind,
+  CalculationResult,
+  MoleculeProject,
+  OrbitalTrackingResult,
+  ReactionPathPlayback,
+  ReactionPathStatus,
+  SketchPlane,
+  SurfaceLayer,
+  Tool,
+  TrackingPreparedFrame,
+  TrackingStatus,
+  TrackingSurfacePreparationResult,
+  Vec3,
+} from '../types'
 
 const plane = (kind: 'XY' | 'YZ' | 'ZX', origin: Vec3, normal: Vec3, basisU: Vec3, basisV: Vec3): SketchPlane => ({
   id: crypto.randomUUID(), kind, atomIds: [], origin, normal, basisU, basisV, visible: kind === 'XY', active: kind === 'XY', valid: true,
@@ -59,6 +75,9 @@ export interface ProjectStore {
   trackingError?: string
   trackingSurfaceError?: string
   trackingResult?: OrbitalTrackingResult
+  trackingStatus: TrackingStatus
+  trackingPreparedFrames: Record<number, TrackingPreparedFrame>
+  trackingPreparedIsovalue?: number
   setTool(tool: Tool): void
   setAddElement(element: string): void
   selectAtom(id: string, additive?: boolean): void
@@ -102,8 +121,12 @@ export interface ProjectStore {
   setReactionPlaying(playing: boolean): void
   beginMoTracking(): void
   completeMoTracking(result: OrbitalTrackingResult): void
+  beginMoTrackingSurfacePreparation(isovalue: number): void
+  completeMoTrackingSurfacePreparation(result: TrackingSurfacePreparationResult): void
+  retryMoTrackingPreparation(): void
   failMoTrackingSetup(message: string): void
   failMoTrackingSurface(message: string): void
+  clearMoTrackingSurfaceError(): void
   failMoTracking(message: string): void
   stopMoTracking(): void
   copyReactionFrameToSingle(): void
@@ -143,7 +166,13 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   history: { past: [], future: [] }, surfaces: [], orbitEnabled: true, aoMode: false,
   calculationKind: 'single', reactionStatus: 'idle', reactionFrameIndex: 0,
   selectedGeometryIndex: 0, reactionScfIterationIndex: 0, reactionCopyPrompt: false,
-  trackingEnabled: false, trackingLoading: false, trackingSurfaceError: undefined, trackingResult: undefined,
+  trackingEnabled: false,
+  trackingLoading: false,
+  trackingSurfaceError: undefined,
+  trackingResult: undefined,
+  trackingStatus: 'idle',
+  trackingPreparedFrames: {},
+  trackingPreparedIsovalue: undefined,
   setTool: tool => {
     const state = get()
     if (state.reactionStatus === 'playing' && structureTools.has(tool)) {
@@ -233,7 +262,40 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   togglePlane: id => { const state = get(); if (blockReactionEdit(state, set)) return; set(withCommand(state, { ...state.project, sketchPlanes: state.project.sketchPlanes.map(p => p.id === id ? { ...p, visible: !p.visible } : p) })) },
   applyDistance: (ids, target) => { const state = get(); if (blockReactionEdit(state, set)) return; try { set(withCommand(state, { ...state.project, atoms: changeDistance(state.project.atoms, state.project.bonds, ...ids, target) })) } catch (e) { set({ error: (e as Error).message }) } },
   applyAngle: (ids, target, camera) => { const state = get(); if (blockReactionEdit(state, set)) return; try { set(withCommand(state, { ...state.project, atoms: changeAngle(state.project.atoms, state.project.bonds, ...ids, target, camera) })) } catch (e) { set({ error: (e as Error).message }) } },
-  setProject: project => set({ project: refreshPlanes(project), optimizedProject: undefined, viewStructure: 'initial', selection: [], history: { past: [], future: [] }, result: undefined, surfaces: [], aoMode: false, aoOrbitalId: undefined, aoSurfaceSnapshot: undefined, error: undefined, calculationKind: 'single', reactionStatus: 'idle', reactionPath: undefined, reactionProject: undefined, reactionFrameIndex: 0, selectedGeometryIndex: 0, reactionScfIterationIndex: 0, reactionError: undefined, reactionCopyPrompt: false, trackingEnabled: false, trackingSourceOrbitalId: undefined, trackingSourceGeometryIndex: undefined, trackingId: undefined, trackingActive: undefined, trackingLoading: false, trackingError: undefined, trackingSurfaceError: undefined, trackingResult: undefined }),
+  setProject: project => set({
+    project: refreshPlanes(project),
+    optimizedProject: undefined,
+    viewStructure: 'initial',
+    selection: [],
+    history: { past: [], future: [] },
+    result: undefined,
+    surfaces: [],
+    aoMode: false,
+    aoOrbitalId: undefined,
+    aoSurfaceSnapshot: undefined,
+    error: undefined,
+    calculationKind: 'single',
+    reactionStatus: 'idle',
+    reactionPath: undefined,
+    reactionProject: undefined,
+    reactionFrameIndex: 0,
+    selectedGeometryIndex: 0,
+    reactionScfIterationIndex: 0,
+    reactionError: undefined,
+    reactionCopyPrompt: false,
+    trackingEnabled: false,
+    trackingSourceOrbitalId: undefined,
+    trackingSourceGeometryIndex: undefined,
+    trackingId: undefined,
+    trackingActive: undefined,
+    trackingLoading: false,
+    trackingError: undefined,
+    trackingSurfaceError: undefined,
+    trackingResult: undefined,
+    trackingStatus: 'idle',
+    trackingPreparedFrames: {},
+    trackingPreparedIsovalue: undefined,
+  }),
   updateProject: patch => { const state = get(); set(withCommand(state, { ...state.project, ...patch })) },
   undo: () => { const state = get(); const previous = state.history.past.at(-1); if (previous) set({ project: previous, history: { past: state.history.past.slice(0, -1), future: [state.project, ...state.history.future] }, selection: [] }) },
   redo: () => { const state = get(); const next = state.history.future[0]; if (next) set({ project: next, history: { past: [...state.history.past, state.project], future: state.history.future.slice(1) }, selection: [] }) },
@@ -270,14 +332,34 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     toolAtoms: [],
     selection: [],
     ...(calculationKind === 'single' ? {
-      trackingEnabled: false, trackingSourceOrbitalId: undefined,
-      trackingSourceGeometryIndex: undefined, trackingId: undefined,
-      trackingActive: undefined, trackingLoading: false, trackingError: undefined,
-      trackingSurfaceError: undefined, trackingResult: undefined,
+      trackingEnabled: false,
+      trackingSourceOrbitalId: undefined,
+      trackingSourceGeometryIndex: undefined,
+      trackingId: undefined,
+      trackingActive: undefined,
+      trackingLoading: false,
+      trackingError: undefined,
+      trackingSurfaceError: undefined,
+      trackingResult: undefined,
+      trackingStatus: 'idle' as TrackingStatus,
+      trackingPreparedFrames: {},
+      trackingPreparedIsovalue: undefined,
     } : {}),
   })),
   setLastCalculationId: lastCalculationId => set(state => ({
     project: { ...state.project, lastCalculationId },
+    trackingEnabled: false,
+    trackingSourceOrbitalId: undefined,
+    trackingSourceGeometryIndex: undefined,
+    trackingId: undefined,
+    trackingActive: undefined,
+    trackingLoading: false,
+    trackingError: undefined,
+    trackingSurfaceError: undefined,
+    trackingResult: undefined,
+    trackingStatus: 'idle',
+    trackingPreparedFrames: {},
+    trackingPreparedIsovalue: undefined,
   })),
   beginReactionPathLoad: () => set({ reactionStatus: 'loading-path', reactionError: undefined }),
   applyReactionPath: reactionPath => set(state => {
@@ -289,10 +371,18 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       reactionProject: projectForReactionFrame(state.project, reactionPath.path, frame),
       reactionStatus: 'paused', reactionError: undefined,
       surfaces: [], selection: [], toolAtoms: [],
-      trackingEnabled: false, trackingSourceOrbitalId: undefined,
-      trackingSourceGeometryIndex: undefined, trackingId: undefined,
-      trackingActive: undefined, trackingLoading: false, trackingError: undefined,
-      trackingSurfaceError: undefined, trackingResult: undefined,
+      trackingEnabled: false,
+      trackingSourceOrbitalId: undefined,
+      trackingSourceGeometryIndex: undefined,
+      trackingId: undefined,
+      trackingActive: undefined,
+      trackingLoading: false,
+      trackingError: undefined,
+      trackingSurfaceError: undefined,
+      trackingResult: undefined,
+      trackingStatus: 'idle',
+      trackingPreparedFrames: {},
+      trackingPreparedIsovalue: undefined,
     }
   }),
   failReactionPath: reactionError => set({ reactionStatus: 'error', reactionError }),
@@ -332,28 +422,44 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       trackingError: undefined,
       trackingSurfaceError: undefined,
       trackingResult: undefined,
+      trackingStatus: 'matching' as TrackingStatus,
+      trackingPreparedFrames: {},
+      trackingPreparedIsovalue: undefined,
     }
   }),
-  completeMoTracking: (resultOrId: OrbitalTrackingResult | string, maybeActive?: boolean) => set(state => {
-    const result = typeof resultOrId === 'string'
-      ? {
-          trackingId: resultOrId,
-          sourceOrbital: state.trackingSourceOrbitalId ?? '',
-          sourceGeometryIndex: state.trackingSourceGeometryIndex ?? 0,
-          threshold: 0.6,
-          active: maybeActive ?? false,
-          steps: [],
-          transitions: [],
-          cacheHit: false,
-        }
-      : resultOrId
+  completeMoTracking: result => set({
+    trackingId: result.trackingId,
+    trackingActive: result.active,
+    trackingLoading: true,
+    trackingError: undefined,
+    trackingSurfaceError: undefined,
+    trackingResult: result,
+    trackingStatus: 'preparing-surfaces',
+    trackingPreparedFrames: {},
+    trackingPreparedIsovalue: undefined,
+  }),
+  beginMoTrackingSurfacePreparation: trackingPreparedIsovalue => set({
+    trackingLoading: true,
+    trackingSurfaceError: undefined,
+    trackingStatus: 'preparing-surfaces',
+    trackingPreparedFrames: {},
+    trackingPreparedIsovalue,
+  }),
+  completeMoTrackingSurfacePreparation: result => set(state => ({
+    trackingLoading: false,
+    trackingSurfaceError: undefined,
+    trackingStatus: state.trackingResult?.active ? 'ready' : 'partial',
+    trackingPreparedFrames: Object.fromEntries(result.frames.map(frame => [frame.frameIndex, frame])),
+    trackingPreparedIsovalue: result.isovalue,
+  })),
+  retryMoTrackingPreparation: () => set(state => {
+    if (!state.trackingEnabled || !state.trackingId || !state.trackingResult) return {}
     return {
-      trackingId: result.trackingId,
-      trackingActive: result.active,
-      trackingLoading: false,
-      trackingError: undefined,
+      trackingLoading: true,
       trackingSurfaceError: undefined,
-      trackingResult: result,
+      trackingStatus: 'preparing-surfaces' as TrackingStatus,
+      trackingPreparedFrames: {},
+      trackingPreparedIsovalue: undefined,
     }
   }),
   failMoTrackingSetup: trackingError => set({
@@ -363,12 +469,17 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     trackingError,
     trackingSurfaceError: undefined,
     trackingResult: undefined,
+    trackingStatus: 'error',
+    trackingPreparedFrames: {},
+    trackingPreparedIsovalue: undefined,
   }),
   failMoTrackingSurface: trackingSurfaceError => set(state => ({
     trackingLoading: false,
     trackingActive: state.trackingActive ?? true,
     trackingSurfaceError,
+    trackingStatus: 'error',
   })),
+  clearMoTrackingSurfaceError: () => set({ trackingSurfaceError: undefined }),
   failMoTracking: trackingError => set({
     trackingEnabled: false,
     trackingLoading: false,
@@ -376,12 +487,23 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     trackingError,
     trackingSurfaceError: undefined,
     trackingResult: undefined,
+    trackingStatus: 'error',
+    trackingPreparedFrames: {},
+    trackingPreparedIsovalue: undefined,
   }),
   stopMoTracking: () => set(state => ({
-    trackingEnabled: false, trackingSourceOrbitalId: undefined,
-    trackingSourceGeometryIndex: undefined, trackingId: undefined,
-    trackingActive: undefined, trackingLoading: false, trackingError: undefined,
-    trackingSurfaceError: undefined, trackingResult: undefined,
+    trackingEnabled: false,
+    trackingSourceOrbitalId: undefined,
+    trackingSourceGeometryIndex: undefined,
+    trackingId: undefined,
+    trackingActive: undefined,
+    trackingLoading: false,
+    trackingError: undefined,
+    trackingSurfaceError: undefined,
+    trackingResult: undefined,
+    trackingStatus: 'idle',
+    trackingPreparedFrames: {},
+    trackingPreparedIsovalue: undefined,
     surfaces: state.surfaces.filter(layer => layer.key !== 'reaction-path-mo'),
   })),
   copyReactionFrameToSingle: () => set(state => {
@@ -397,6 +519,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       trackingSourceGeometryIndex: undefined, trackingId: undefined,
       trackingActive: undefined, trackingLoading: false, trackingError: undefined,
       trackingSurfaceError: undefined, trackingResult: undefined,
+      trackingStatus: 'idle',
+      trackingPreparedFrames: {},
+      trackingPreparedIsovalue: undefined,
       notice: '현재 경로 프레임을 새 단일 구조로 복사했습니다.',
     }
   }),

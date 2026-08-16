@@ -51,6 +51,13 @@ export interface MoleculeProject {
 
 export type OrbitalSpin = 'restricted' | 'alpha' | 'beta'
 export type CalculationKind = 'single' | 'reaction-path'
+export type TrackingStatus =
+  | 'idle'
+  | 'matching'
+  | 'preparing-surfaces'
+  | 'ready'
+  | 'partial'
+  | 'error'
 
 export type JobCreateRequest =
   | { mode: 'orca' | 'demo'; calculationKind?: 'single'; project: MoleculeProject }
@@ -85,6 +92,7 @@ export interface CalculatedImage {
   index: number
   atoms: CalculatedImageAtom[]
   energyHartree: number | null
+  electronicStructureEnergyHartree?: number | null
   energyChangeHartree?: number | null
   relativeEnergyKjMol: number | null
   reactionCoordinate: number | null
@@ -110,6 +118,14 @@ export interface ReactionPathResult {
   hasPhysicalTime: false
   isPhysicalTimeTrajectory?: false
   initialGuess?: 'PAtom' | null
+  optimizationMethod?: string | null
+  orbitalPostprocess?: {
+    strategy: 'sequential-single-point'
+    method: string
+    firstGuess: 'PAtom'
+    subsequentGuess: 'MOREAD'
+    source: 'previous-geometry-gbw'
+  } | null
   sourceTrajectory?: string | null
   energyReference?: 'first-image'
   energyUnit?: 'hartree'
@@ -163,6 +179,9 @@ export interface OrbitalTrackingResult {
   sourceOrbital: string
   sourceGeometryIndex: number
   threshold: number
+  algorithmVersion?: string
+  ambiguityMargin?: number
+  cubeResolution?: number
   active: boolean
   steps: Array<{ geometry: number; orbital: string; phase: number }>
   transitions: Array<{
@@ -182,6 +201,21 @@ export interface Orbital {
   occupancy: number
   spin: OrbitalSpin
   label?: string
+}
+
+export interface TrackingPreparedFrame {
+  frameIndex: number
+  meshUrls: Record<string, string>
+  cacheHit: boolean
+}
+
+export interface TrackingSurfacePreparationResult {
+  trackingId: string
+  isovalue: number
+  frames: TrackingPreparedFrame[]
+  preparedFrames: number
+  skippedFrames: number
+  cacheHit: boolean
 }
 
 export interface CalculationResult {

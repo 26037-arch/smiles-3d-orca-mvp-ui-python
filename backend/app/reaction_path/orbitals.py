@@ -131,7 +131,7 @@ def align_phase(values: np.ndarray, signed_overlap: float) -> np.ndarray:
     return (-values if signed_overlap < 0 else values).copy()
 
 
-def interpolate_scalar_fields(left: np.ndarray, right: np.ndarray, value: float) -> np.ndarray:
+def interpolate_scalar_fields(left: np.ndarray, right: np.ndarray, value: float, *, preserve_l2_norm: bool = True) -> np.ndarray:
     if left.shape != right.shape:
         raise ValueError("보간할 scalar field의 shape가 다릅니다")
     if not 0 <= value <= 1:
@@ -139,6 +139,17 @@ def interpolate_scalar_fields(left: np.ndarray, right: np.ndarray, value: float)
     result = (1 - value) * left + value * right
     if not np.all(np.isfinite(result)):
         raise ValueError("보간된 scalar field에 NaN 또는 무한대가 있습니다")
+    if not preserve_l2_norm:
+        return result
+    left_norm = float(np.linalg.norm(left))
+    right_norm = float(np.linalg.norm(right))
+    target_norm = (1 - value) * left_norm + value * right_norm
+    current_norm = float(np.linalg.norm(result))
+    if current_norm <= 1e-14:
+        if target_norm <= 1e-14:
+            return result
+        return np.where(np.abs(left) >= np.abs(right), left, right).astype(float, copy=False)
+    result = result * (target_norm / current_norm)
     return result
 
 

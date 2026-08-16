@@ -1,4 +1,17 @@
-import type { CalculationResult, Capabilities, JobCreateRequest, JobRecord, MoleculeProject, OrbitalComposition, OrbitalSpin, OrbitalTrackingResult, PlotSample, PlotSampleRequest, ReactionPathPlayback } from '../types'
+import type {
+  CalculationResult,
+  Capabilities,
+  JobCreateRequest,
+  JobRecord,
+  MoleculeProject,
+  OrbitalComposition,
+  OrbitalSpin,
+  OrbitalTrackingResult,
+  PlotSample,
+  PlotSampleRequest,
+  ReactionPathPlayback,
+  TrackingSurfacePreparationResult,
+} from '../types'
 
 export function apiErrorMessage(body: any, status: number, statusText: string): string {
   const detail = body?.detail?.message ?? body?.detail
@@ -31,6 +44,17 @@ export const api = {
   reactionOrbitalTrack: (id: string, orbitalId: string, sourceGeometryIndex: number, signal?: AbortSignal) => request<OrbitalTrackingResult>(`/api/jobs/${id}/reaction-path/orbitals/track`, { method: 'POST', body: JSON.stringify({ orbital_id: orbitalId, source_geometry_index: sourceGeometryIndex }), signal }),
   reactionGeometrySurface: (id: string, geometryIndex: number, body: any) => request<any>(`/api/jobs/${id}/reaction-path/geometries/${geometryIndex}/surfaces`, { method: 'POST', body: JSON.stringify(body) }),
   trackingFrameSurface: (id: string, trackingId: string, frameIndex: number, isovalue: number, signal?: AbortSignal) => request<{ frameIndex: number; meshUrls: Record<string, string>; cacheHit: boolean }>(`/api/jobs/${id}/reaction-path/tracking/${trackingId}/frames/${frameIndex}/surface`, { method: 'POST', body: JSON.stringify({ isovalue }), signal }),
+  prepareTrackingSurfaces: (
+    id: string,
+    trackingId: string,
+    isovalue: number,
+    signal?: AbortSignal,
+  ) => request<TrackingSurfacePreparationResult>(`/api/jobs/${id}/reaction-path/tracking/${trackingId}/prepare`, {
+    method: 'POST',
+    body: JSON.stringify({ isovalue }),
+    signal,
+  }),
+  releaseTrackingSurfaces: (id: string, trackingId: string) => request<{ released: number }>(`/api/jobs/${id}/reaction-path/tracking/${trackingId}/release`, { method: 'POST' }),
   cancel: (id: string) => request<JobRecord>(`/api/jobs/${id}/cancel`, { method: 'POST' }),
   surface: (id: string, body: any) => request<any>(`/api/jobs/${id}/surfaces`, { method: 'POST', body: JSON.stringify(body) }),
   composition: (id: string, spin: OrbitalSpin, orcaIndex: number, offset = 0, limit = 5, signal?: AbortSignal) => request<OrbitalComposition>(`/api/jobs/${id}/orbitals/${spin}/${orcaIndex}/composition?offset=${offset}&limit=${limit}`, { signal }),

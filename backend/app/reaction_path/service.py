@@ -307,6 +307,59 @@ class ReactionPathService:
             current_index = next_index
         return tracked, transitions
 
+    def prepare_tracking_surfaces(
+        self,
+        job_id: UUID,
+        tracking_id: str,
+        isovalue: float = 0.03,
+    ) -> dict[str, object]:
+        playback = self.load(job_id)
+        metadata = self._tracking_metadata(self.jobs._job_dir(job_id), tracking_id)
+        tracked = {item["geometry"]: item for item in metadata["steps"]}
+        prepared: list[dict[str, object]] = []
+        skipped = 0
+        all_hit = True
+        for frame_index, frame in enumerate(playback.display_frames):
+            if frame.left_image_index not in tracked or frame.right_image_index not in tracked:
+                skipped += 1
+                continue
+            try:
+                payload = self.tracking_frame_surface(job_id, tracking_id, frame_index, isovalue)
+            except ReactionPathError:
+                skipped += 1
+                continue
+            prepared.append({
+                "frameIndex": frame_index,
+                "meshUrls": payload["meshUrls"],
+                "cacheHit": bool(payload["cacheHit"]),
+            })
+            all_hit = all_hit and bool(payload["cacheHit"])
+        return {
+            "trackingId": tracking_id,
+            "isovalue": isovalue,
+            "frames": prepared,
+            "preparedFrames": len(prepared),
+            "skippedFrames": skipped,
+            "cacheHit": all_hit,
+        }
+
+    def release_tracking_surfaces(
+        self,
+        job_id: UUID,
+        tracking_id: str,
+    ) -> dict[str, object]:
+        job_dir = self.jobs._job_dir(job_id)
+        directory = self._tracking_directory(job_dir)
+        removed = 0
+        for candidate in list(directory.iterdir()):
+            if candidate.is_file() and candidate.suffix.lower() in {".ply", ".json"}:
+                try:
+                    candidate.unlink()
+                    removed += 1
+                except OSError:
+                    continue
+        return {"trackingId": tracking_id, "released": removed}
+
     def tracking_frame_surface(
         self,
         job_id: UUID,
