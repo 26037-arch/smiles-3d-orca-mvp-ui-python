@@ -252,7 +252,7 @@ class ReactionPathService:
                                     ),
                                 )
                             )
-                    except (ValueError, ReactionPathError):
+                    except ValueError:
                         continue
             tracker = OrbitalTracker(current_orbital)
             signed = 0.0

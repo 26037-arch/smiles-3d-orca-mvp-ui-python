@@ -143,4 +143,36 @@ describe('reaction path state', () => {
     useProjectStore.getState().stopMoTracking()
     expect(useProjectStore.getState().trackingEnabled).toBe(false)
   })
+
+  it('stores the full tracking result and keeps frame surface failures separate from setup failures', () => {
+    const project = newProject(); project.atoms = [
+      { id: 'a', element: 'H', position: [0, 0, 0] }, { id: 'b', element: 'H', position: [.7, 0, 0] },
+    ]
+    useProjectStore.getState().setProject(project)
+    useProjectStore.getState().applyReactionPath(reactionPlayback())
+    useProjectStore.getState().setSelectedOrbital('restricted:7')
+
+    useProjectStore.getState().beginMoTracking()
+    expect(useProjectStore.getState().trackingLoading).toBe(true)
+    expect(useProjectStore.getState().trackingEnabled).toBe(true)
+
+    const result = {
+      trackingId: 'abc123', sourceOrbital: 'restricted:7', sourceGeometryIndex: 0,
+      threshold: 0.6, active: true, steps: [{ geometry: 0, orbital: 'restricted:7', phase: 1 }],
+      transitions: [], cacheHit: false,
+    }
+    useProjectStore.getState().completeMoTracking(result)
+    expect(useProjectStore.getState().trackingId).toBe('abc123')
+    expect(useProjectStore.getState().trackingResult).toEqual(result)
+    expect(useProjectStore.getState().trackingError).toBeUndefined()
+
+    useProjectStore.getState().failMoTrackingSurface('surface failed')
+    expect(useProjectStore.getState().trackingSurfaceError).toBe('surface failed')
+    expect(useProjectStore.getState().trackingError).toBeUndefined()
+
+    useProjectStore.getState().stopMoTracking()
+    expect(useProjectStore.getState().trackingEnabled).toBe(false)
+    expect(useProjectStore.getState().trackingLoading).toBe(false)
+    expect(useProjectStore.getState().trackingSurfaceError).toBeUndefined()
+  })
 })

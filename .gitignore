@@ -12,3 +12,4 @@ frontend/coverage/
 .env
 data/jobs/
 data/settings.json
+.pytest-tmp

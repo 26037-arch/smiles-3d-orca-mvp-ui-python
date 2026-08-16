@@ -220,3 +220,27 @@ def test_tracking_is_explicit_metadata_only_and_frame_meshes_are_lazy(
     )
     assert again["cacheHit"] is True
     assert len(generated) == 2
+
+
+def test_tracking_propagates_cube_generation_failure(monkeypatch, tmp_path):
+    raw = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    for index, image in enumerate(raw["images"]):
+        image["wavefunctionRef"] = f"step-{index:03d}.gbw"
+        image["orbitals"] = [{
+            "internal_id": "restricted:7",
+            "orca_index": 7,
+            "display_number": 8,
+            "energy_hartree": -0.2 + index * 0.01,
+            "occupancy": 2,
+        }]
+        (tmp_path / image["wavefunctionRef"]).write_bytes(b"gbw")
+    (tmp_path / "reaction-path.json").write_text(json.dumps(raw), encoding="utf-8")
+
+    class FakeFields:
+        def ensure_context(self, *_args, **_kwargs):
+            raise ReactionPathError("ORBITAL_TRACKING_FAILED", "Cube generation failed")
+
+    service = ReactionPathService(FakeJobs(tmp_path), fields=FakeFields())
+    with pytest.raises(ReactionPathError) as caught:
+        service.track_orbital(uuid4(), "restricted:7", 1)
+    assert caught.value.code == "ORBITAL_TRACKING_FAILED"
